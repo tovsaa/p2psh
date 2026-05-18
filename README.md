@@ -1,5 +1,10 @@
 # P2PSH
 
+[![container](https://github.com/tovsaa/p2psh/actions/workflows/container.yml/badge.svg)](https://github.com/tovsaa/p2psh/actions/workflows/container.yml)
+[![pages](https://github.com/tovsaa/p2psh/actions/workflows/pages.yml/badge.svg)](https://github.com/tovsaa/p2psh/actions/workflows/pages.yml)
+[![ghcr image](https://img.shields.io/badge/ghcr.io-tovsaa%2Fp2psh-blue?logo=github)](https://github.com/tovsaa/p2psh/pkgs/container/p2psh)
+[![web client](https://img.shields.io/badge/web%20client-tovsaa.github.io%2Fp2psh-success)](https://tovsaa.github.io/p2psh/)
+
 **An SSH-like shell into your Linux box, with the server addressable only as a
 mixnet identity.** No public IP, no port forwarding, no domain or TLS
 certificate. The browser is the client; the server can sit behind NAT, CGNAT,
