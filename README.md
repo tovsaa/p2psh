@@ -4,6 +4,7 @@
 [![pages](https://github.com/tovsaa/p2psh/actions/workflows/pages.yml/badge.svg)](https://github.com/tovsaa/p2psh/actions/workflows/pages.yml)
 [![ghcr image](https://img.shields.io/badge/ghcr.io-tovsaa%2Fp2psh-blue?logo=github)](https://github.com/tovsaa/p2psh/pkgs/container/p2psh)
 [![web client](https://img.shields.io/badge/web%20client-tovsaa.github.io%2Fp2psh-success)](https://tovsaa.github.io/p2psh/)
+[![license](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
 **An SSH-like shell into your Linux box, with the server addressable only as a
 mixnet identity.** No public IP, no port forwarding, no domain or TLS
@@ -74,10 +75,7 @@ CLI client env vars (when running `npm run client` directly):
 
 | Var                  | Default                            | Purpose                                              |
 |----------------------|------------------------------------|------------------------------------------------------|
-| `P2PSH_CONNECT`      | —                                  | the `p2psh1://…` string from the server (preferred)  |
-| `P2PSH_SERVER_ADDR`  | —                                  | (legacy) Nym mix address                             |
-| `P2PSH_SERVER_PK`    | —                                  | (legacy) base64url ML-KEM-768 public key             |
-| `P2PSH_SERVER_IDPK`  | —                                  | (legacy) base64url Ed25519 identity public key       |
+| `P2PSH_CONNECT`      | —                                  | the `p2psh1://…` string from the server              |
 
 ## Development
 
@@ -176,16 +174,6 @@ DataChannel with a JSON envelope: `{t:"o", d:string}` for output,
 - Late-arriving frames from the previous session after a resume are dropped
   silently (the wire seqs overlap the new session's anti-replay window).
 
-## Roadmap
-
-- Pin the spawned shell to `ssh fixed-user@localhost` for stricter
-  isolation on multi-tenant hosts.
-- arm64 container build once Nym publishes an arm64 binary (or via an
-  in-tree Rust cross-build step).
-- QR-code rendering of the connect string, browser-side camera scanner —
-  for mobile-first onboarding.
-
 ## License
 
-TBD — currently all rights reserved by the author. Open an issue if you
-want a permissive license and we'll pick one.
+Apache License 2.0 — see [LICENSE](LICENSE).
