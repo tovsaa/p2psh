@@ -34,10 +34,15 @@ export interface PeerHandle {
 export async function bringUpPeer(opts: PeerOptions): Promise<PeerHandle> {
   const { role, nym, session, remoteAddr } = opts;
 
-  // No ICE servers: for the MVP both processes run on the same Windows host,
-  // so host candidates (127.0.0.1 / WSL-NAT IPs) are sufficient. Real
-  // deployments will set iceServers to public STUN.
-  const pc = new RTCPeerConnection({ iceServers: [] });
+  // Public STUN so each side can discover its server-reflexive (post-NAT)
+  // address and hole-punch through Docker/CGNAT/home-router NAT. Without
+  // STUN, ICE only has host candidates, which other peers can't reach.
+  const pc = new RTCPeerConnection({
+    iceServers: [
+      { urls: "stun:stun.l.google.com:19302" },
+      { urls: "stun:stun.cloudflare.com:3478" },
+    ],
+  });
 
   const sendSignal = (s: Signal): void => {
     const frame = encodeAppData(session, new TextEncoder().encode(JSON.stringify(s)));

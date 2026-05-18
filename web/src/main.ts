@@ -184,7 +184,12 @@ async function runWebRTC(
   session: Session,
   serverAddr: string,
 ): Promise<void> {
-  const pc = new RTCPeerConnection({ iceServers: [] });
+  const pc = new RTCPeerConnection({
+    iceServers: [
+      { urls: "stun:stun.l.google.com:19302" },
+      { urls: "stun:stun.cloudflare.com:3478" },
+    ],
+  });
   type IceInit = Parameters<typeof pc.addIceCandidate>[0];
   let remoteDescApplied = false;
   const pendingCandidates: IceInit[] = [];
