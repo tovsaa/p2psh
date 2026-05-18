@@ -1,0 +1,33 @@
+{
+  "name": "p2psh",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "P2P SSH-over-WebRTC with Nym signaling and ML-KEM key exchange",
+  "scripts": {
+    "server": "tsx src/server/main.ts",
+    "client": "tsx src/client/cli.ts",
+    "web": "vite --host 127.0.0.1 --port 5173 --strictPort",
+    "build": "vite build",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@noble/ciphers": "^1.2.1",
+    "@noble/curves": "^1.9.7",
+    "@noble/hashes": "^1.7.1",
+    "@noble/post-quantum": "^0.4.1",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
+    "node-pty": "^1.1.0",
+    "werift": "^0.23.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@nymproject/sdk-full-fat": "^1.4.1",
+    "@types/node": "^22.10.0",
+    "@types/ws": "^8.5.13",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vite": "^8.0.13"
+  }
+}
