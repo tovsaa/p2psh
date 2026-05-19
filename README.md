@@ -27,7 +27,7 @@ The wire goes:
                               (UDP P2P, post-handshake)
 ```
 
-- **Key exchange:** ML-KEM-768 (post-quantum) → HKDF-SHA256 → ChaCha20-Poly1305.
+- **Key exchange:** ML-KEM-768 (post-quantum, `@noble/post-quantum`, version-pinned with a [KAT regression test](tests/ml-kem-kat.ts)) → HKDF-SHA256 → ChaCha20-Poly1305. Threat model and known limitations: see [`SECURITY.md`](SECURITY.md).
 - **Server authentication:** Ed25519 signature over the transcript, client pins the public key.
 - **Signaling:** every SDP / ICE / resume frame travels through Nym, AEAD-sealed; the gateway sees only encrypted bytes.
 - **Data plane:** browser-native `RTCPeerConnection` ↔ `werift` on Node.js. After WebRTC is up, Nym is idle.
@@ -68,6 +68,9 @@ Server-side env vars (set with `-e` on `docker run`):
 | `P2PSH_NYM_URL`      | `ws://127.0.0.1:1977`              | local `nym-client` native WS endpoint                |
 | `P2PSH_SHELL`        | `bash`                             | shell to spawn for each connection                   |
 | `P2PSH_SHELL_ARGS`   | (empty)                            | space-separated args, e.g. `-l` for a login shell    |
+| `P2PSH_RESTRICT`     | (unset)                            | set to `1` to swap `bash` for `rbash` on POSIX       |
+| `P2PSH_AUDIT_LOG`    | (unset)                            | path to append per-peer keystroke audit lines        |
+| `P2PSH_TRANSPORT`    | `any`                              | allowlist of data-plane transports the server accepts: `any`, `webrtc`, `nym`, or comma list |
 | `P2PSH_WEB_URL`      | (unset)                            | public web-client URL; if set, the server also prints a ready-to-share deep link |
 | `NYM_CLIENT_ID`      | `p2psh`                            | nym-client config id (under `$HOME/.nym/clients/`)   |
 
@@ -76,6 +79,69 @@ CLI client env vars (when running `npm run client` directly):
 | Var                  | Default                            | Purpose                                              |
 |----------------------|------------------------------------|------------------------------------------------------|
 | `P2PSH_CONNECT`      | —                                  | the `p2psh1://…` string from the server              |
+| `P2PSH_TRANSPORT`    | `webrtc`                           | the transport this client requests; server rejects if not in its allowlist |
+
+### Transport modes
+
+The data plane is **client-chosen**, because the privacy/latency tradeoff
+sits with the client: a peer behind symmetric NAT or wanting full mixnet
+anonymity may opt out of WebRTC even when the server would happily speak it.
+The server only declares which transports it accepts (`P2PSH_TRANSPORT`
+allowlist); the client must pick one per session and send it in `hello`/`resume`
+(the field is required — there is no implicit default on the wire). A
+mismatched request gets an explicit `{t:"error", code:"transport-not-allowed"}`
+frame back; a missing/invalid field gets `code:"bad-request"`. Either way the
+client sees a fatal reject instead of a silent hang.
+
+- **`webrtc` (client default).** After the ML-KEM handshake the peers swap
+  SDP/ICE over Nym, then move all traffic to a P2P WebRTC DataChannel. Lowest
+  latency, but each side learns the other's public IP via STUN
+  (`stun.l.google.com`, `stun.cloudflare.com`) — Nym anonymity covers the
+  handshake only.
+- **`nym`.** Every shell frame is AEAD-sealed and routed through the mixnet,
+  WebRTC is skipped entirely. Neither side ever learns the other's IP. Latency
+  is noticeably higher (typical mixnet RTT is hundreds of ms).
+
+The web client runs a 3s STUN probe on load against two independent STUN
+servers (Google and Cloudflare). It classifies the local NAT as:
+**`ok`** (srflx consistent — direct P2P should work), **`symmetric`** (the
+two STUN servers see different reflexive ports for the same local port —
+hole-punch is impossible without a TURN relay, which we don't ship), or
+**`blocked`** (no srflx at all — UDP egress blocked or captive portal). The
+last two disable the WebRTC radio and force the Nym tunnel.
+
+### Browser session resume — threat model
+
+The web client persists the post-handshake symmetric key in `localStorage`
+keyed by the server's Ed25519 identity. This lets repeated connects skip the
+ML-KEM round-trip. Caveats:
+
+- **XSS reads it.** Any script that runs in this origin (a compromised bundle,
+  an injected dev tool, a malicious browser extension) can read both the key
+  and the session id, then resume your session from another box. There is no
+  pure technical fix that keeps both convenience and XSS-resistance without a
+  user passphrase, so we keep the convenience and document it instead.
+- **Mitigations.** Clear it manually any time:
+  ```js
+  for (const k of Object.keys(localStorage)) if (k.startsWith("p2psh-resume:")) localStorage.removeItem(k);
+  ```
+  For higher-security setups, use the CLI client (`npm run client`) — its
+  resume state lives in `./data/client-state-*.json` and is filesystem-scoped,
+  not exposed to any page.
+- **What a stolen key buys.** Only the live session's symmetric key. The
+  server's Ed25519 identity stays private; without it nobody can impersonate
+  the server. The stolen key cannot decrypt past traffic captured before the
+  most recent resume (each resume rotates via HKDF), but it CAN read and inject
+  traffic on the current session until the server tears it down (full
+  handshake from a different client) or restarts.
+
+### Shell hardening
+
+By default the spawned shell gets a curated env (PATH, HOME, LANG, TERM, …);
+host credentials like `AWS_*`, `GITHUB_TOKEN`, `SSH_AUTH_SOCK` are dropped
+before `spawn`. Set `P2PSH_RESTRICT=1` to switch to `rbash` on POSIX. Set
+`P2PSH_AUDIT_LOG=/var/log/p2psh-audit.log` to record every keystroke line
+with an ISO timestamp and a short peer label.
 
 ## Development
 
