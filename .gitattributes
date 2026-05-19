@@ -1,0 +1,8 @@
+# Shell scripts ship into Linux containers — must keep LF line endings even
+# when checked out on Windows, otherwise `bash` sees "bash\r" on the shebang
+# and the container fails to start.
+*.sh text eol=lf
+docker/entrypoint.sh text eol=lf
+
+# Dockerfile is parsed by buildkit on Linux too; keep LF for safety.
+Dockerfile text eol=lf

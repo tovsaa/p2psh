@@ -7,8 +7,17 @@ set -euo pipefail
 
 NYM_HOME="${HOME}/.nym"
 CLIENT_ID="${NYM_CLIENT_ID:-p2psh}"
+# Keep nym-client output inside HOME (/data/home) instead of /tmp. /tmp is
+# world-readable to other processes in the same pid namespace; the log holds
+# gateway identifiers and connection diagnostics we don't want casually leaked.
+# Mode 0600 tightens it further so even another uid in the same volume can't
+# read it.
+NYM_LOG_DIR="$NYM_HOME/run"
+NYM_LOG="$NYM_LOG_DIR/nym-client.log"
 
-mkdir -p "$HOME"
+mkdir -p "$HOME" "$NYM_LOG_DIR"
+: > "$NYM_LOG"
+chmod 600 "$NYM_LOG"
 
 # Initialize nym-client on first run. After that the config + key material
 # under /data/home/.nym/clients/<id> is reused.
@@ -19,7 +28,7 @@ fi
 
 # Launch nym-client in the background. Its native WS interface comes up on
 # 127.0.0.1:1977 once gateway authentication completes.
-nym-client run --id "$CLIENT_ID" >/tmp/nym-client.log 2>&1 &
+nym-client run --id "$CLIENT_ID" >"$NYM_LOG" 2>&1 &
 NYM_PID=$!
 
 cleanup() {
@@ -34,12 +43,12 @@ trap cleanup TERM INT
 # so the server's WS connect to 127.0.0.1:1977 doesn't race the gateway dial.
 echo "[entrypoint] waiting for nym-client to be ready..."
 for _ in $(seq 1 90); do
-    if grep -q "Client startup finished" /tmp/nym-client.log 2>/dev/null; then
+    if grep -q "Client startup finished" "$NYM_LOG" 2>/dev/null; then
         break
     fi
     if ! kill -0 "$NYM_PID" 2>/dev/null; then
         echo "[entrypoint] nym-client died before becoming ready:"
-        cat /tmp/nym-client.log
+        cat "$NYM_LOG"
         exit 1
     fi
     sleep 1
