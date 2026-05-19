@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import { createNymMixnetClient, NymMixnetClient, EventKinds } from "@nymproject/sdk-full-fat";
 
 // Browser-side Nym transport. Exposes the same surface our Node transport

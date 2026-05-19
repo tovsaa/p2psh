@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import {
   ClientHandshakeState,
   ClientResumeAttempt,
@@ -12,10 +13,11 @@ import {
   extractResumeStateFromHandshake,
   newResumeStateAfterResume,
 } from "../../src/shared/handshake.js";
-import { Msg, b64uDecode, b64uEncode } from "../../src/shared/protocol.js";
+import { Msg, TransportChoice, b64uDecode, b64uEncode } from "../../src/shared/protocol.js";
 import { Signal } from "../../src/shared/signaling.js";
 import { decodeConnectString } from "../../src/shared/connect-string.js";
 import { NymBrowserTransport } from "./nym-browser.js";
+import { NymChannel, Channel } from "../../src/shared/channel.js";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
@@ -56,13 +58,126 @@ function dropResumeState(serverIdPkB64: string): void {
   localStorage.removeItem(STORAGE_PREFIX + serverIdPkB64);
 }
 
-// Auto-fill the connect string from the URL hash (#c=p2psh1://...), so a
-// shared link drops the user straight onto Connect.
+// Auto-fill the connect string + transport from the URL hash
+// (#c=p2psh1://...&t=nym), so a shared link drops the user straight onto Connect.
 (() => {
   const hash = location.hash.replace(/^#/, "");
   const params = new URLSearchParams(hash);
   const c = params.get("c");
   if (c) $<HTMLTextAreaElement>("connect").value = c;
+  const t = params.get("t");
+  if (t === "nym" || t === "webrtc") {
+    const radio = document.querySelector<HTMLInputElement>(`input[name="transport"][value="${t}"]`);
+    if (radio) radio.checked = true;
+  }
+})();
+
+function selectedTransport(): TransportChoice {
+  const checked = document.querySelector<HTMLInputElement>('input[name="transport"]:checked');
+  return checked?.value === "nym" ? "nym" : "webrtc";
+}
+
+// Classify the local NAT against two independent STUN servers within a short
+// window. We hit Google and Cloudflare from the same RTCPeerConnection, then:
+//
+//   "ok"        — at least one srflx candidate appeared AND any srflx
+//                 candidates that share a local port (rport) report the same
+//                 reflexive ip:port. Cone-style NAT or open network — direct
+//                 WebRTC P2P should work.
+//   "symmetric" — srflx candidates appeared but with DIFFERENT reflexive
+//                 ip:port for the same local port. Symmetric NAT allocates a
+//                 fresh external mapping per destination; direct P2P UDP
+//                 cannot be hole-punched without a TURN relay (we don't ship
+//                 one), so this transport must be Nym.
+//   "blocked"   — no srflx candidate at all in the window. UDP egress
+//                 blocked, captive portal, or every STUN unreachable. Also
+//                 forces Nym.
+type NatProbeResult = "ok" | "symmetric" | "blocked";
+
+function classify(reflexivesByRport: Map<string, Set<string>>): NatProbeResult {
+  if (reflexivesByRport.size === 0) return "blocked";
+  let totalReflexives = 0;
+  let inconsistent = false;
+  for (const set of reflexivesByRport.values()) {
+    totalReflexives += set.size;
+    if (set.size > 1) inconsistent = true;
+  }
+  if (inconsistent) return "symmetric";
+  // Only one reflexive in total means a single STUN responded — we can't
+  // distinguish cone vs symmetric. Be optimistic; if WebRTC ultimately can't
+  // establish, the bring-up timeout will surface that separately.
+  void totalReflexives;
+  return "ok";
+}
+
+async function probeNat(timeoutMs = 3000): Promise<NatProbeResult> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const reflexivesByRport = new Map<string, Set<string>>();
+    const pc = new RTCPeerConnection({
+      iceServers: [
+        { urls: "stun:stun.l.google.com:19302" },
+        { urls: "stun:stun.cloudflare.com:3478" },
+      ],
+    });
+    const finish = (result: NatProbeResult): void => {
+      if (settled) return;
+      settled = true;
+      try { pc.close(); } catch { /* ignore */ }
+      resolve(result);
+    };
+    pc.onicecandidate = ({ candidate }) => {
+      if (!candidate) {
+        finish(classify(reflexivesByRport));
+        return;
+      }
+      const line = candidate.candidate;
+      // candidate:foundation comp proto prio IP PORT typ srflx raddr R rport P
+      const m = line.match(/typ srflx .* rport (\d+)/);
+      if (!m) return;
+      const rport = m[1];
+      const parts = line.split(/\s+/);
+      const refKey = `${parts[4]}:${parts[5]}`;
+      let bucket = reflexivesByRport.get(rport);
+      if (!bucket) {
+        bucket = new Set();
+        reflexivesByRport.set(rport, bucket);
+      }
+      bucket.add(refKey);
+    };
+    pc.createDataChannel("probe");
+    pc.createOffer()
+      .then((o) => pc.setLocalDescription(o))
+      .catch(() => finish("blocked"));
+    setTimeout(() => finish(classify(reflexivesByRport)), timeoutMs);
+  });
+}
+
+void (async () => {
+  const statusEl = $<HTMLParagraphElement>("nat-status");
+  const webrtcRadio = document.querySelector<HTMLInputElement>('input[name="transport"][value="webrtc"]')!;
+  const nymRadio = document.querySelector<HTMLInputElement>('input[name="transport"][value="nym"]')!;
+  const result = await probeNat();
+  if (result === "ok") {
+    statusEl.textContent = "WebRTC reachable (consistent srflx across two STUN servers).";
+    statusEl.style.color = "#5a5";
+    return;
+  }
+  if (result === "symmetric") {
+    statusEl.textContent =
+      "Symmetric NAT detected — direct P2P UDP hole-punch will fail. Forcing Nym tunnel.";
+  } else {
+    statusEl.textContent =
+      "WebRTC unavailable — no STUN srflx candidate (UDP blocked or strict NAT). Forcing Nym tunnel.";
+  }
+  statusEl.style.color = "#e88";
+  webrtcRadio.disabled = true;
+  // Keep the user's hash-pinned choice if they explicitly asked for nym;
+  // otherwise force-flip.
+  if (webrtcRadio.checked) {
+    webrtcRadio.checked = false;
+    nymRadio.checked = true;
+  }
 })();
 
 $<HTMLButtonElement>("go").addEventListener("click", () => {
@@ -87,6 +202,9 @@ async function run(): Promise<void> {
   const serverPk = b64uDecode(serverPkB64);
   const serverIdPk = b64uDecode(serverIdPkB64);
 
+  const transport = selectedTransport();
+  log(`transport=${transport}`);
+
   // Two negotiation paths: resume first if we have saved state, fall back to
   // full ML-KEM handshake on NACK or any decryption failure.
   const saved = loadResumeState(serverIdPkB64);
@@ -94,7 +212,7 @@ async function run(): Promise<void> {
   let session: Session;
   if (saved) {
     log("found saved session — attempting resume...");
-    const attempt = clientResume(saved, me);
+    const attempt = clientResume(saved, me, transport);
     nym.send(serverAddr, JSON.stringify(attempt.request));
     try {
       session = await awaitResumeResult(nym, attempt, serverIdPkB64);
@@ -102,14 +220,20 @@ async function run(): Promise<void> {
     } catch (e) {
       log(`resume failed (${(e as Error).message}); doing full handshake.`);
       dropResumeState(serverIdPkB64);
-      session = await fullHandshake(nym, serverPk, serverIdPk, serverIdPkB64, serverAddr, me);
+      session = await fullHandshake(nym, serverPk, serverIdPk, serverIdPkB64, serverAddr, me, transport);
     }
   } else {
-    session = await fullHandshake(nym, serverPk, serverIdPk, serverIdPkB64, serverAddr, me);
+    session = await fullHandshake(nym, serverPk, serverIdPk, serverIdPkB64, serverAddr, me, transport);
   }
 
-  // From here on, everything in the AEAD session is WebRTC signaling.
-  await runWebRTC(nym, session, serverAddr);
+  if (transport === "nym") {
+    const channel = new NymChannel(nym, session, serverAddr);
+    log("Nym-tunneled channel open — attaching terminal.");
+    attachTerminal(channel);
+  } else {
+    // From here on, everything in the AEAD session is WebRTC signaling.
+    await runWebRTC(nym, session, serverAddr);
+  }
 }
 
 function awaitResumeResult(
@@ -125,7 +249,10 @@ function awaitResumeResult(
       } catch {
         return;
       }
-      if (msg.t === "resume-nack") {
+      if (msg.t === "error") {
+        detach();
+        reject(new Error(`server rejected request: ${msg.code} (${msg.reason ?? ""})`));
+      } else if (msg.t === "resume-nack") {
         detach();
         reject(new Error(`NACK: ${msg.reason ?? "unknown"}`));
       } else if (msg.t === "resume-ack") {
@@ -151,14 +278,20 @@ function fullHandshake(
   serverIdPkB64: string,
   serverAddr: string,
   me: string,
+  transport: TransportChoice,
 ): Promise<Session> {
   return new Promise((resolve, reject) => {
-    const state: ClientHandshakeState = clientInitiate(serverPk, me);
+    const state: ClientHandshakeState = clientInitiate(serverPk, me, transport);
     const detach = nym.onMessage(({ text }) => {
       let msg: Msg;
       try {
         msg = JSON.parse(text);
       } catch {
+        return;
+      }
+      if (msg.t === "error") {
+        detach();
+        reject(new Error(`server rejected request: ${msg.code} (${msg.reason ?? ""})`));
         return;
       }
       if (msg.t !== "ack") return;
@@ -255,7 +388,7 @@ async function runWebRTC(
   const dc = pc.createDataChannel("app");
   dc.onopen = () => {
     log("WebRTC DataChannel open — attaching terminal.");
-    attachTerminal(dc);
+    attachTerminal(dc as unknown as Channel);
   };
 
   const offer = await pc.createOffer();
@@ -263,10 +396,15 @@ async function runWebRTC(
   sendSignal({ t: "sdp", role: "offer", sdp: pc.localDescription!.sdp! });
 }
 
-// Bridges xterm.js <-> DataChannel using the same JSON envelope the server
-// expects: { t: "o", d } from server (output), { t: "i", d } from client
-// (input), { t: "r", c, r } from client (resize hint).
-function attachTerminal(dc: RTCDataChannel): void {
+// Bridges xterm.js <-> Channel using the same JSON envelope the server expects:
+// { t: "o", d } from server (output), { t: "i", d } from client (input),
+// { t: "r", c, r } from client (resize hint). Works for both WebRTC and the
+// Nym-tunneled NymChannel.
+function attachTerminal(channel: Channel): void {
+  // Test hook: exposes the active channel and terminal on window so an
+  // e2e driver can simulate input without faking keyboard events. Safe to
+  // ship — it's just a reference, not extra capability.
+  (window as unknown as { __p2psh?: unknown }).__p2psh = { channel };
   const term = new Terminal({
     convertEol: false,
     fontSize: 13,
@@ -280,8 +418,8 @@ function attachTerminal(dc: RTCDataChannel): void {
   fit.fit();
 
   const sendResize = (): void => {
-    if (dc.readyState !== "open") return;
-    dc.send(JSON.stringify({ t: "r", c: term.cols, r: term.rows }));
+    if (channel.readyState !== "open") return;
+    channel.send(JSON.stringify({ t: "r", c: term.cols, r: term.rows }));
   };
   sendResize();
   window.addEventListener("resize", () => {
@@ -290,11 +428,11 @@ function attachTerminal(dc: RTCDataChannel): void {
   });
 
   term.onData((data) => {
-    if (dc.readyState !== "open") return;
-    dc.send(JSON.stringify({ t: "i", d: data }));
+    if (channel.readyState !== "open") return;
+    channel.send(JSON.stringify({ t: "i", d: data }));
   });
 
-  dc.onmessage = (ev) => {
+  channel.addEventListener("message", (ev) => {
     const text = typeof ev.data === "string" ? ev.data : new TextDecoder().decode(ev.data);
     let msg: { t: string; d?: string };
     try {
@@ -303,9 +441,9 @@ function attachTerminal(dc: RTCDataChannel): void {
       return;
     }
     if (msg.t === "o" && typeof msg.d === "string") term.write(msg.d);
-  };
+  });
 
-  dc.addEventListener("close", () => {
+  channel.addEventListener("close", () => {
     term.write("\r\n\x1b[31m[connection closed]\x1b[0m\r\n");
   });
 

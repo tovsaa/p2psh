@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import { readFile, writeFile, mkdir, unlink } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { dirname } from "node:path";
@@ -15,11 +16,16 @@ import {
   newResumeStateAfterResume,
 } from "../shared/handshake.js";
 import { NymTransport } from "../shared/nym-transport.js";
-import { Msg, b64uDecode, b64uEncode } from "../shared/protocol.js";
+import { Msg, TransportChoice, b64uDecode, b64uEncode } from "../shared/protocol.js";
 import { bringUpPeer } from "../shared/webrtc-peer.js";
+import { NymChannel, Channel } from "../shared/channel.js";
 import { decodeConnectString } from "../shared/connect-string.js";
 
 const NYM_URL = process.env.P2PSH_NYM_URL ?? "ws://127.0.0.1:1977";
+const TRANSPORT: TransportChoice = (() => {
+  const v = (process.env.P2PSH_TRANSPORT ?? "webrtc").toLowerCase();
+  return v === "nym" ? "nym" : "webrtc";
+})();
 
 // Prefer the single bundled connect string; fall back to the legacy three
 // individual env vars so existing setups keep working.
@@ -103,23 +109,28 @@ async function main(): Promise<void> {
     session = await fullHandshake(nym, serverPk, serverIdPk, me);
   }
 
-  // WebRTC + simple echo to prove the channel works end-to-end.
-  const { dc } = await bringUpPeer({
-    role: "offerer",
-    nym,
-    session,
-    remoteAddr: SERVER_ADDR!,
-  });
-  console.log("[client] WebRTC DataChannel open — sending probe.");
-  dc.addEventListener("message", (ev: MessageEvent) => {
+  // Echo probe — the server attaches a PTY shell on whichever transport is
+  // selected, so the same probe works in both modes.
+  let channel: Channel;
+  if (TRANSPORT === "nym") {
+    channel = new NymChannel(nym, session, SERVER_ADDR!);
+    console.log("[client] Nym-tunneled channel open — sending probe.");
+  } else {
+    const { dc } = await bringUpPeer({
+      role: "offerer",
+      nym,
+      session,
+      remoteAddr: SERVER_ADDR!,
+    });
+    channel = dc;
+    console.log("[client] WebRTC DataChannel open — sending probe.");
+  }
+  channel.addEventListener("message", (ev) => {
     const text = typeof ev.data === "string" ? ev.data : new TextDecoder().decode(ev.data);
-    // The server now attaches a PTY shell, so what comes back is JSON {t:"o", d:"..."}.
-    // We just print the raw text and exit after the first frame.
-    console.log(`[client] DataChannel recv: ${text.slice(0, 120)}${text.length > 120 ? "..." : ""}`);
+    console.log(`[client] channel recv: ${text.slice(0, 120)}${text.length > 120 ? "..." : ""}`);
     setTimeout(() => process.exit(0), 200);
   });
-  // Probe input that the PTY shell will echo back via its prompt.
-  dc.send(JSON.stringify({ t: "i", d: "\r" }));
+  channel.send(JSON.stringify({ t: "i", d: "\r" }));
 }
 
 function attemptResume(
@@ -128,7 +139,7 @@ function attemptResume(
   me: string,
 ): Promise<Session> {
   return new Promise((resolve, reject) => {
-    const attempt: ClientResumeAttempt = clientResume(saved, me);
+    const attempt: ClientResumeAttempt = clientResume(saved, me, TRANSPORT);
     const detach = nym.onMessage(({ text }) => {
       let msg: Msg;
       try {
@@ -136,7 +147,10 @@ function attemptResume(
       } catch {
         return;
       }
-      if (msg.t === "resume-nack") {
+      if (msg.t === "error") {
+        detach();
+        reject(new Error(`server rejected request: ${msg.code} (${msg.reason ?? ""})`));
+      } else if (msg.t === "resume-nack") {
         detach();
         reject(new Error(`NACK: ${msg.reason ?? "unknown"}`));
       } else if (msg.t === "resume-ack") {
@@ -163,12 +177,17 @@ function fullHandshake(
   me: string,
 ): Promise<Session> {
   return new Promise((resolve, reject) => {
-    const state = clientInitiate(serverPk, me);
+    const state = clientInitiate(serverPk, me, TRANSPORT);
     const detach = nym.onMessage(({ text }) => {
       let msg: Msg;
       try {
         msg = JSON.parse(text);
       } catch {
+        return;
+      }
+      if (msg.t === "error") {
+        detach();
+        reject(new Error(`server rejected request: ${msg.code} (${msg.reason ?? ""})`));
         return;
       }
       if (msg.t !== "ack") return;

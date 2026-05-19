@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import { ml_kem768 } from "@noble/post-quantum/ml-kem";
 import { chacha20poly1305 } from "@noble/ciphers/chacha";
 import { ed25519 } from "@noble/curves/ed25519";
@@ -9,6 +10,7 @@ import {
   ResumeAck,
   ResumeRequest,
   ServerAck,
+  TransportChoice,
   DIR_C2S,
   DIR_S2C,
   TRANSCRIPT_LABEL,
@@ -155,13 +157,18 @@ export interface ClientHandshakeState {
   sessionKey: Uint8Array;
 }
 
-export function clientInitiate(serverPk: Uint8Array, replyTo: string): ClientHandshakeState {
+export function clientInitiate(
+  serverPk: Uint8Array,
+  replyTo: string,
+  transport: TransportChoice,
+): ClientHandshakeState {
   const { cipherText, sharedSecret } = ml_kem768.encapsulate(serverPk);
   const key = deriveSessionKey(sharedSecret);
   const sessionId = deriveSessionId(sharedSecret);
   const session = makeSession(key, DIR_C2S, DIR_S2C);
+  const hello: ClientHello = { t: "hello", kemCt: b64uEncode(cipherText), replyTo, transport };
   return {
-    hello: { t: "hello", kemCt: b64uEncode(cipherText), replyTo },
+    hello,
     session,
     kemCt: cipherText,
     serverKemPk: serverPk,
@@ -194,17 +201,23 @@ export interface ClientResumeAttempt {
   session: Session; // already armed with rotated key
 }
 
-export function clientResume(saved: ResumeState, replyTo: string): ClientResumeAttempt {
+export function clientResume(
+  saved: ResumeState,
+  replyTo: string,
+  transport: TransportChoice,
+): ClientResumeAttempt {
   const salt = randomBytes(16);
   const rotatedKey = rotateKey(saved.key, salt);
   const session = makeSession(rotatedKey, DIR_C2S, DIR_S2C);
+  const request: ResumeRequest = {
+    t: "resume",
+    sessionId: b64uEncode(saved.sessionId),
+    salt: b64uEncode(salt),
+    replyTo,
+    transport,
+  };
   return {
-    request: {
-      t: "resume",
-      sessionId: b64uEncode(saved.sessionId),
-      salt: b64uEncode(salt),
-      replyTo,
-    },
+    request,
     sessionId: saved.sessionId,
     rotatedKey,
     session,

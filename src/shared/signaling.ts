@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Messages exchanged inside AppData.enc once the AEAD session is up.
 // The Nym mixnet only ever sees these in encrypted form.
 //

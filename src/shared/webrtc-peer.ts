@@ -1,8 +1,10 @@
+// SPDX-License-Identifier: Apache-2.0
 import { RTCPeerConnection, RTCDataChannel } from "werift";
 import { Session, decodeAppData, encodeAppData } from "./handshake.js";
 import { Msg } from "./protocol.js";
 import { Signal } from "./signaling.js";
 import { NymTransport } from "./nym-transport.js";
+import { Channel, ChannelMessageEvent, ChannelReadyState } from "./channel.js";
 
 export interface PeerOptions {
   role: "offerer" | "answerer";
@@ -12,12 +14,54 @@ export interface PeerOptions {
 }
 
 export interface PeerHandle {
-  dc: RTCDataChannel;
+  // A Channel facade over the WebRTC DataChannel. Werift's RTCDataChannel
+  // does NOT speak the browser EventTarget protocol — its messages come
+  // through `dc.onMessage.subscribe((data) => …)`, not
+  // `addEventListener("message", …)`. We wrap it here so the rest of the
+  // server (ssh-bridge, etc.) speaks one transport-agnostic interface.
+  dc: Channel;
   pc: RTCPeerConnection;
   // Releases the Nym signaling listener and closes the PeerConnection. Call
   // when the peer reconnects so we don't accumulate stale sessions that keep
   // trying to decrypt frames with old keys.
   dispose: () => void;
+}
+
+function adaptWeriftDataChannel(dc: RTCDataChannel): Channel {
+  const msgListeners: ((ev: ChannelMessageEvent) => void)[] = [];
+  const closeListeners: (() => void)[] = [];
+  dc.onMessage.subscribe((data) => {
+    const text = typeof data === "string" ? data : data.toString("utf-8");
+    for (const l of msgListeners) {
+      try {
+        l({ data: text });
+      } catch (e) {
+        console.error("[webrtc-channel] message listener threw:", e);
+      }
+    }
+  });
+  dc.stateChanged.subscribe((state) => {
+    if (state === "closed") {
+      for (const l of closeListeners) {
+        try {
+          l();
+        } catch (e) {
+          console.error("[webrtc-channel] close listener threw:", e);
+        }
+      }
+    }
+  });
+  return {
+    get readyState(): ChannelReadyState {
+      return dc.readyState as ChannelReadyState;
+    },
+    send: (s: string): void => dc.send(s),
+    close: (): void => dc.close(),
+    addEventListener: ((event: "message" | "close", listener: (ev: ChannelMessageEvent) => void | (() => void)): void => {
+      if (event === "message") msgListeners.push(listener as (ev: ChannelMessageEvent) => void);
+      else closeListeners.push(listener as () => void);
+    }) as Channel["addEventListener"],
+  };
 }
 
 /**
@@ -142,7 +186,7 @@ export async function bringUpPeer(opts: PeerOptions): Promise<PeerHandle> {
 
   const openDc = await dcPromise;
   return {
-    dc: openDc,
+    dc: adaptWeriftDataChannel(openDc),
     pc,
     dispose: () => {
       detach();

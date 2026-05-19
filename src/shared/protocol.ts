@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Wire format for the P2PSH signaling/handshake protocol.
 //
 // All messages are JSON objects sent as text frames over the Nym mixnet.
@@ -18,12 +19,26 @@
 //      `seq` is a monotonically increasing per-direction counter that
 //      doubles as the AEAD nonce (12 bytes: 4 bytes direction tag || 8 bytes BE seq).
 
-export type Msg = ClientHello | ServerAck | AppData | ResumeRequest | ResumeAck | ResumeNack;
+export type Msg =
+  | ClientHello
+  | ServerAck
+  | AppData
+  | ResumeRequest
+  | ResumeAck
+  | ResumeNack
+  | ServerError;
+
+// Wire-level transport choice. The client picks (subject to server allowlist)
+// because the privacy/latency tradeoff lives on the client side: a client
+// behind symmetric NAT or wanting full anonymity may opt for "nym" even when
+// the server would happily speak WebRTC.
+export type TransportChoice = "webrtc" | "nym";
 
 export interface ClientHello {
   t: "hello";
   kemCt: string; // base64url, 1088 bytes
   replyTo: string; // client's Nym mix address; server uses this to route ack + further frames
+  transport: TransportChoice;
 }
 
 export interface ServerAck {
@@ -57,6 +72,7 @@ export interface ResumeRequest {
   sessionId: string; // base64url, 16 bytes
   salt: string;      // base64url, 16 bytes, fresh per resume
   replyTo: string;   // client's Nym mix address
+  transport: TransportChoice; // see ClientHello.transport
 }
 
 export interface ResumeAck {
@@ -66,6 +82,16 @@ export interface ResumeAck {
 
 export interface ResumeNack {
   t: "resume-nack";
+  reason?: string;
+}
+
+// Plaintext fatal error from server during/after handshake (e.g. requested
+// transport not allowed by P2PSH_TRANSPORT allowlist). Distinct from
+// resume-nack because hello can fail this way too, and the client should
+// surface it instead of silently falling back.
+export interface ServerError {
+  t: "error";
+  code: "transport-not-allowed" | "bad-request";
   reason?: string;
 }
 

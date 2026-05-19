@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import { b64uDecode, b64uEncode } from "./protocol.js";
 
 // One self-contained string the user copies from the server console and pastes

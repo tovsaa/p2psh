@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import WebSocket from "ws";
 
 // Talks to a locally running `nym-client` over its native WebSocket interface
