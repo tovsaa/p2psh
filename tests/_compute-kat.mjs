@@ -1,0 +1,15 @@
+import { ml_kem768 } from '@noble/post-quantum/ml-kem';
+const seed = new Uint8Array(64);
+for (let i = 0; i < 64; i++) seed[i] = i;
+const msg = new Uint8Array(32);
+for (let i = 0; i < 32; i++) msg[i] = 128 + i;
+const { publicKey, secretKey } = ml_kem768.keygen(seed);
+const { cipherText, sharedSecret } = ml_kem768.encapsulate(publicKey, msg);
+const ss2 = ml_kem768.decapsulate(cipherText, secretKey);
+const hex = (u) => Array.from(u).map(b => b.toString(16).padStart(2,'0')).join('');
+console.log('publicKey.len=' + publicKey.length + ' sha256_first=' + hex(publicKey).slice(0,32));
+console.log('secretKey.len=' + secretKey.length + ' sha256_first=' + hex(secretKey).slice(0,32));
+console.log('cipherText.len=' + cipherText.length + ' first16=' + hex(cipherText).slice(0,32));
+console.log('ss_alice=' + hex(sharedSecret));
+console.log('ss_bob=' + hex(ss2));
+console.log('match=' + (hex(sharedSecret) === hex(ss2)));

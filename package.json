@@ -9,18 +9,22 @@
     "client": "tsx src/client/cli.ts",
     "web": "vite --host 127.0.0.1 --port 5173 --strictPort",
     "build": "vite build",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "tsx tests/ml-kem-kat.ts && tsx tests/aead.ts && tsx tests/handshake.ts"
   },
   "dependencies": {
     "@noble/ciphers": "^1.2.1",
     "@noble/curves": "^1.9.7",
     "@noble/hashes": "^1.7.1",
-    "@noble/post-quantum": "^0.4.1",
+    "@noble/post-quantum": "0.4.1",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
     "node-pty": "^1.1.0",
     "werift": "^0.23.0",
     "ws": "^8.18.0"
+  },
+  "_notes": {
+    "@nymproject/sdk-full-fat": "Browser-only: pulled in by vite at web build time and inlined into the static bundle. Not needed at Node runtime (server uses the WS-based NymTransport instead), hence devDependencies. Removing it would still let `npm run server` work but break `npm run web` / `vite build`."
   },
   "devDependencies": {
     "@nymproject/sdk-full-fat": "^1.4.1",
