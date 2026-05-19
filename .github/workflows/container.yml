@@ -16,6 +16,9 @@ on:
 permissions:
   contents: read
   packages: write
+  # Trivy uploads results as a SARIF artifact and (when on push to main) to
+  # GitHub Security tab; both need `security-events: write`.
+  security-events: write
 
 env:
   REGISTRY: ghcr.io
@@ -48,7 +51,8 @@ jobs:
             type=semver,pattern=latest
             type=sha,prefix=sha-
 
-      - uses: docker/build-push-action@v6
+      - id: build
+        uses: docker/build-push-action@v6
         with:
           context: .
           # amd64 only for now; arm64 needs a hand-built nym-client (see README).
@@ -58,3 +62,23 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # CVE scan the freshly-published image. We don't fail the build on
+      # findings (severity threshold is left to the SARIF reviewer) — the goal
+      # is visibility, not gating, since some Debian-base CVEs sit unfixed
+      # for months and would block every push.
+      - name: Trivy image scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+          format: sarif
+          output: trivy-results.sarif
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+
+      - name: Upload Trivy SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy-container

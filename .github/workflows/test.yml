@@ -1,0 +1,26 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      # Fail on CRITICAL CVEs in runtime deps. We can't gate on HIGH yet:
+      # werift pulls in an old `ip` package (GHSA-2p57-rm9w-gvfp, SSRF in
+      # `ip.isPublic`) which has no upstream fix and which we don't call into
+      # — the bug is in a code path we never reach. Revisit when werift moves
+      # to @isaacs/ip-fork or when we migrate WebRTC libraries.
+      - run: npm audit --omit=dev --audit-level=critical
