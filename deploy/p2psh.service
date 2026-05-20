@@ -58,7 +58,10 @@ Environment=P2PSH_SHELL=/bin/bash
 # Comment out if you actually want peers to write outside /home/p2psh.
 NoNewPrivileges=true
 ProtectSystem=strict
-ProtectHome=tristate          # /home/p2psh stays writable; other /home read-only
+# read-only: all /home/* becomes read-only; ReadWritePaths below re-opens
+# /home/p2psh only. (Valid values: true|false|read-only|tmpfs — there's no
+# `tristate` despite some docs implying so.)
+ProtectHome=read-only
 PrivateTmp=true
 ProtectKernelTunables=true
 ProtectKernelModules=true

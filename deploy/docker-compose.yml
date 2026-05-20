@@ -13,7 +13,9 @@
 services:
   p2psh:
     # Pin to a tagged release for reproducibility. Bump as new versions ship.
-    image: ghcr.io/tovsaa/p2psh:v0.1.0
+    # (Tags drop the leading `v` — docker convention; git tag v0.1.0 → image
+    # tag 0.1.0.)
+    image: ghcr.io/tovsaa/p2psh:0.1.0
     container_name: p2psh
     restart: unless-stopped
 
