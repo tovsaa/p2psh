@@ -68,7 +68,7 @@ jobs:
       # is visibility, not gating, since some Debian-base CVEs sit unfixed
       # for months and would block every push.
       - name: Trivy image scan
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
           format: sarif
