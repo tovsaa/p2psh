@@ -21,8 +21,15 @@ import { decodeConnectString } from "../../src/shared/connect-string.js";
 // see the dynamic `import("./nym-browser.js")` inside run().
 import type { NymBrowserTransport } from "./nym-browser.js";
 import { NymChannel, Channel } from "../../src/shared/channel.js";
-import { Terminal } from "@xterm/xterm";
-import { FitAddon } from "@xterm/addon-fit";
+// xterm + addon-fit (~400 KB minified, gzip ~120 KB) only become useful
+// once we have an open Channel. They're loaded inside attachTerminal via
+// dynamic import() so the initial paint and the NAT probe don't wait on
+// them. Type-only references stay static and are erased at build time.
+// The xterm.css side-effect import stays at the top because (a) it's only
+// ~4 KB so splitting it doesn't help, and (b) it would need a CSS module
+// ambient declaration to satisfy strict TS.
+import type { Terminal as TerminalType } from "@xterm/xterm";
+import type { FitAddon as FitAddonType } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -243,7 +250,7 @@ async function run(): Promise<void> {
   };
 
   const channel = await connectOnce();
-  attachTerminal(channel, connectOnce);
+  await attachTerminal(channel, connectOnce);
 }
 
 function awaitResumeResult(
@@ -424,7 +431,16 @@ async function runWebRTC(
 // channel is re-established.
 type ReconnectFn = () => Promise<Channel>;
 
-function attachTerminal(initialChannel: Channel, reconnect: ReconnectFn | null = null): void {
+async function attachTerminal(initialChannel: Channel, reconnect: ReconnectFn | null = null): Promise<void> {
+  // Lazy-load xterm so the heavy bundle (Terminal renderer + escape parser
+  // + addon-fit + CSS) doesn't sit in the critical path. By the time the
+  // Channel is open we've already taken multiple seconds on the WASM Nym
+  // SDK + ML-KEM handshake, so this dynamic import is invisible.
+  const [{ Terminal }, { FitAddon }] = await Promise.all([
+    import("@xterm/xterm"),
+    import("@xterm/addon-fit"),
+  ]);
+
   let channel = initialChannel;
   // Test hook: exposes the active channel and terminal on window so an
   // e2e driver can simulate input without faking keyboard events. Safe to
@@ -434,14 +450,14 @@ function attachTerminal(initialChannel: Channel, reconnect: ReconnectFn | null =
     get channel(): Channel { return channel; },
   };
 
-  const term = new Terminal({
+  const term: TerminalType = new Terminal({
     convertEol: false,
     fontSize: 13,
     fontFamily: "ui-monospace, monospace",
     cursorBlink: true,
     theme: { background: "#000000" },
   });
-  const fit = new FitAddon();
+  const fit: FitAddonType = new FitAddon();
   term.loadAddon(fit);
   term.open($("term"));
   // term.open() schedules layout; fit.fit() measures the container's
