@@ -28,6 +28,30 @@ import { encodeConnectString } from "../shared/connect-string.js";
 const IDENTITY_PATH = process.env.P2PSH_IDENTITY ?? "./data/server-identity.json";
 const NYM_URL = process.env.P2PSH_NYM_URL ?? "ws://127.0.0.1:1977";
 
+// Soft caps to keep a single instance from being trivially DoS'd through
+// the Nym route (the connect string is shareable; anyone with it can spam
+// hello/resume frames, each of which burns ML-KEM decap CPU).
+//
+//   P2PSH_MAX_SESSIONS   — hard cap on concurrent active peers. Past this,
+//                          new hello/resume requests get a `bad-request`
+//                          error frame ("server at capacity"). Defaults to
+//                          32, which fits comfortably within typical
+//                          single-core CPU and the in-memory session map.
+//   P2PSH_RATE_PER_MIN   — sliding-window cap on hello+resume *attempts*
+//                          per peer-address per 60 seconds. Spammers
+//                          rotate replyTo for each frame to bypass this,
+//                          but doing so costs them new Nym SURBs and gives
+//                          us logs to correlate; bots that don't rotate
+//                          get muted within seconds. Defaults to 10.
+const MAX_SESSIONS = (() => {
+  const v = parseInt(process.env.P2PSH_MAX_SESSIONS ?? "32", 10);
+  return Number.isFinite(v) && v > 0 ? v : 32;
+})();
+const RATE_PER_MIN = (() => {
+  const v = parseInt(process.env.P2PSH_RATE_PER_MIN ?? "10", 10);
+  return Number.isFinite(v) && v > 0 ? v : 10;
+})();
+
 // P2PSH_TRANSPORT is now an allowlist — the *client* picks the per-session
 // transport (it has the privacy/latency context). The server only declares
 // which transports it is willing to accept.
@@ -132,6 +156,26 @@ async function main(): Promise<void> {
   const peers = new Map<string, PeerState>();
   const livePeers = new Set<string>(); // peer addresses currently mid-bring-up
 
+  // Sliding-window rate limiter keyed by replyTo: each map entry holds the
+  // timestamps of recent hello/resume attempts; entries older than the
+  // window are dropped on read. Per-peer state grows with peer churn but
+  // each entry is small (an array of numbers) and we GC-prune in the
+  // hello/resume handlers below.
+  const RATE_WINDOW_MS = 60_000;
+  const recentAttempts = new Map<string, number[]>();
+  const checkRate = (replyTo: string): boolean => {
+    const now = Date.now();
+    const cutoff = now - RATE_WINDOW_MS;
+    const arr = (recentAttempts.get(replyTo) ?? []).filter((t) => t >= cutoff);
+    if (arr.length >= RATE_PER_MIN) {
+      recentAttempts.set(replyTo, arr); // keep pruned state
+      return false;
+    }
+    arr.push(now);
+    recentAttempts.set(replyTo, arr);
+    return true;
+  };
+
   const tearDownPeer = (peerAddr: string): void => {
     const old = peers.get(peerAddr);
     if (!old) return;
@@ -207,7 +251,38 @@ async function main(): Promise<void> {
     return requested;
   };
 
-  nym.onMessage(async ({ text }) => {
+  // Reject hello/resume past MAX_SESSIONS or above the per-peer rate limit.
+  // Returns true if the caller should proceed; false means a reply was
+  // already sent and the caller should bail. peers.size is the number of
+  // *attached* peers (post-handshake); livePeers.size catches the in-flight
+  // bringups so we don't admit more than we can build out.
+  const admit = (replyTo: string): boolean => {
+    if (!checkRate(replyTo)) {
+      const err: ServerError = {
+        t: "error",
+        code: "bad-request",
+        reason: `rate limit: ${RATE_PER_MIN}/min per peer`,
+      };
+      nym.send(replyTo, JSON.stringify(err));
+      console.log(`[server] rate-limited ${replyTo.slice(0, 24)}...`);
+      return false;
+    }
+    if (peers.size + livePeers.size >= MAX_SESSIONS) {
+      const err: ServerError = {
+        t: "error",
+        code: "bad-request",
+        reason: `server at capacity (${MAX_SESSIONS} sessions)`,
+      };
+      nym.send(replyTo, JSON.stringify(err));
+      console.log(`[server] at capacity, rejected ${replyTo.slice(0, 24)}...`);
+      return false;
+    }
+    return true;
+  };
+
+  let shuttingDown = false;
+  const detachNymListener = nym.onMessage(async ({ text }) => {
+    if (shuttingDown) return;
     let msg: Msg;
     try {
       msg = JSON.parse(text);
@@ -226,6 +301,7 @@ async function main(): Promise<void> {
         // nym.send returns, before Node's event loop can deliver another
         // incoming frame.
         if (livePeers.has(hello.replyTo)) return; // frame after handshake belongs to webrtc-peer
+        if (!admit(hello.replyTo)) return;
         const transport = pickTransport(hello.replyTo, hello.transport);
         if (!transport) return;
         livePeers.add(hello.replyTo);
@@ -242,6 +318,7 @@ async function main(): Promise<void> {
       if (msg.t === "resume") {
         const req = msg as ResumeRequest;
         if (livePeers.has(req.replyTo)) return;
+        if (!admit(req.replyTo)) return;
         const saved = sessions.get(req.sessionId);
         if (!saved) {
           const nack: ResumeNack = { t: "resume-nack", reason: "unknown sessionId" };
@@ -265,6 +342,26 @@ async function main(): Promise<void> {
       console.error("[server] message handling failed:", e);
     }
   });
+
+  // Graceful shutdown. systemd / docker stop send SIGTERM and then SIGKILL
+  // after 10s by default; we want to spend the first 10s tearing down peers
+  // cleanly (close DataChannels so the browser shows "[connection lost]"
+  // and starts its backoff, kill PTYs so children don't get orphaned, close
+  // the local nym-client WS) and only then exit.
+  let shutdownStarted = false;
+  const shutdown = async (signal: string): Promise<void> => {
+    if (shutdownStarted) return;
+    shutdownStarted = true;
+    shuttingDown = true;
+    console.log(`[server] received ${signal}, shutting down ${peers.size} peer(s)...`);
+    try { detachNymListener(); } catch (e) { console.error("[server] detach:", e); }
+    for (const [addr] of peers) tearDownPeer(addr);
+    try { await nym.close(); } catch (e) { console.error("[server] nym.close:", e); }
+    console.log("[server] shutdown complete.");
+    process.exit(0);
+  };
+  process.on("SIGTERM", () => void shutdown("SIGTERM"));
+  process.on("SIGINT", () => void shutdown("SIGINT"));
 }
 
 main().catch((e) => {

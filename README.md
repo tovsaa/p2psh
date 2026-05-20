@@ -136,6 +136,8 @@ Server-side env vars (set with `-e` on `docker run`):
 | `P2PSH_RESTRICT`     | (unset)                            | set to `1` to swap `bash` for `rbash` on POSIX       |
 | `P2PSH_AUDIT_LOG`    | (unset)                            | path to append per-peer keystroke audit lines        |
 | `P2PSH_EPHEMERAL_HOME` | (unset)                          | set to `1` to spawn each session in a fresh `mkdtemp` `$HOME` that's wiped on disconnect |
+| `P2PSH_MAX_SESSIONS` | `32`                               | hard cap on concurrent active peers; past this, new hello/resume gets `bad-request "server at capacity"` |
+| `P2PSH_RATE_PER_MIN` | `10`                               | sliding-window cap on hello+resume attempts per peer-address per minute |
 | `P2PSH_TRANSPORT`    | `any`                              | allowlist of data-plane transports the server accepts: `any`, `webrtc`, `nym`, or comma list |
 | `P2PSH_WEB_URL`      | (unset)                            | public web-client URL; if set, the server also prints a ready-to-share deep link |
 | `NYM_CLIENT_ID`      | `p2psh`                            | nym-client config id (under `$HOME/.nym/clients/`)   |
