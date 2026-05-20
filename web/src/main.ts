@@ -210,35 +210,40 @@ async function run(): Promise<void> {
   const transport = selectedTransport();
   log(`transport=${transport}`);
 
-  // Two negotiation paths: resume first if we have saved state, fall back to
-  // full ML-KEM handshake on NACK or any decryption failure.
-  const saved = loadResumeState(serverIdPkB64);
-
-  let session: Session;
-  if (saved) {
-    log("found saved session — attempting resume...");
-    const attempt = clientResume(saved, me, transport);
-    nym.send(serverAddr, JSON.stringify(attempt.request));
-    try {
-      session = await awaitResumeResult(nym, attempt, serverIdPkB64);
-      log("resume OK — skipped full handshake.");
-    } catch (e) {
-      log(`resume failed (${(e as Error).message}); doing full handshake.`);
-      dropResumeState(serverIdPkB64);
+  // One full connect cycle: (resume | full handshake) → channel bringup.
+  // Returned as a closure so attachTerminal can call it again on a clean
+  // channel close, preserving the live xterm instance + the user's WASM
+  // Nym SDK initialization across reconnects.
+  const connectOnce = async (): Promise<Channel> => {
+    const saved = loadResumeState(serverIdPkB64);
+    let session: Session;
+    if (saved) {
+      log("found saved session — attempting resume...");
+      const attempt = clientResume(saved, me, transport);
+      nym.send(serverAddr, JSON.stringify(attempt.request));
+      try {
+        session = await awaitResumeResult(nym, attempt, serverIdPkB64);
+        log("resume OK — skipped full handshake.");
+      } catch (e) {
+        log(`resume failed (${(e as Error).message}); doing full handshake.`);
+        dropResumeState(serverIdPkB64);
+        session = await fullHandshake(nym, serverPk, serverIdPk, serverIdPkB64, serverAddr, me, transport);
+      }
+    } else {
       session = await fullHandshake(nym, serverPk, serverIdPk, serverIdPkB64, serverAddr, me, transport);
     }
-  } else {
-    session = await fullHandshake(nym, serverPk, serverIdPk, serverIdPkB64, serverAddr, me, transport);
-  }
 
-  if (transport === "nym") {
-    const channel = new NymChannel(nym, session, serverAddr);
-    log("Nym-tunneled channel open — attaching terminal.");
-    attachTerminal(channel);
-  } else {
-    // From here on, everything in the AEAD session is WebRTC signaling.
-    await runWebRTC(nym, session, serverAddr);
-  }
+    if (transport === "nym") {
+      const channel = new NymChannel(nym, session, serverAddr);
+      log("Nym-tunneled channel open.");
+      return channel;
+    } else {
+      return await runWebRTC(nym, session, serverAddr);
+    }
+  };
+
+  const channel = await connectOnce();
+  attachTerminal(channel, connectOnce);
 }
 
 function awaitResumeResult(
@@ -321,7 +326,7 @@ async function runWebRTC(
   nym: NymBrowserTransport,
   session: Session,
   serverAddr: string,
-): Promise<void> {
+): Promise<Channel> {
   const pc = new RTCPeerConnection({
     iceServers: [
       { urls: "stun:stun.l.google.com:19302" },
@@ -391,25 +396,44 @@ async function runWebRTC(
   });
 
   const dc = pc.createDataChannel("app");
-  dc.onopen = () => {
-    log("WebRTC DataChannel open — attaching terminal.");
-    attachTerminal(dc as unknown as Channel);
-  };
 
   const offer = await pc.createOffer();
   await pc.setLocalDescription(offer);
   sendSignal({ t: "sdp", role: "offer", sdp: pc.localDescription!.sdp! });
+
+  // Wait for the data channel to actually open before handing it back, so
+  // the caller (connectOnce) doesn't try to send through a still-CONNECTING
+  // channel.
+  await new Promise<void>((resolve, reject) => {
+    if (dc.readyState === "open") return resolve();
+    dc.addEventListener("open", () => resolve(), { once: true });
+    dc.addEventListener("error", (e) => reject(e), { once: true });
+  });
+  log("WebRTC DataChannel open.");
+  return dc as unknown as Channel;
 }
 
 // Bridges xterm.js <-> Channel using the same JSON envelope the server expects:
 // { t: "o", d } from server (output), { t: "i", d } from client (input),
 // { t: "r", c, r } from client (resize hint). Works for both WebRTC and the
 // Nym-tunneled NymChannel.
-function attachTerminal(channel: Channel): void {
+//
+// If `reconnect` is provided, channel close triggers an exponential-backoff
+// reconnect loop (2 s / 5 s / 15 s, then give up). The xterm instance and
+// the WASM Nym client both survive across reconnects — only the data
+// channel is re-established.
+type ReconnectFn = () => Promise<Channel>;
+
+function attachTerminal(initialChannel: Channel, reconnect: ReconnectFn | null = null): void {
+  let channel = initialChannel;
   // Test hook: exposes the active channel and terminal on window so an
   // e2e driver can simulate input without faking keyboard events. Safe to
-  // ship — it's just a reference, not extra capability.
-  (window as unknown as { __p2psh?: unknown }).__p2psh = { channel };
+  // ship — it's just a reference, not extra capability. The getter ensures
+  // the hook follows reconnects.
+  (window as unknown as { __p2psh?: object }).__p2psh = {
+    get channel(): Channel { return channel; },
+  };
+
   const term = new Terminal({
     convertEol: false,
     fontSize: 13,
@@ -442,20 +466,46 @@ function attachTerminal(channel: Channel): void {
     channel.send(JSON.stringify({ t: "i", d: data }));
   });
 
-  channel.addEventListener("message", (ev) => {
-    const text = typeof ev.data === "string" ? ev.data : new TextDecoder().decode(ev.data);
-    let msg: { t: string; d?: string };
-    try {
-      msg = JSON.parse(text);
-    } catch {
+  const RECONNECT_DELAYS_MS = [2000, 5000, 15000];
+
+  const wireIncoming = (ch: Channel): void => {
+    ch.addEventListener("message", (ev) => {
+      const text = typeof ev.data === "string" ? ev.data : new TextDecoder().decode(ev.data);
+      let msg: { t: string; d?: string };
+      try { msg = JSON.parse(text); } catch { return; }
+      if (msg.t === "o" && typeof msg.d === "string") term.write(msg.d);
+    });
+    ch.addEventListener("close", () => {
+      if (!reconnect) {
+        term.write("\r\n\x1b[31m[connection closed]\x1b[0m\r\n");
+        return;
+      }
+      void attemptReconnect(0);
+    });
+  };
+
+  const attemptReconnect = async (attempt: number): Promise<void> => {
+    if (attempt >= RECONNECT_DELAYS_MS.length) {
+      term.write("\r\n\x1b[31m[reconnect gave up — reload the page to retry]\x1b[0m\r\n");
       return;
     }
-    if (msg.t === "o" && typeof msg.d === "string") term.write(msg.d);
-  });
+    const delay = RECONNECT_DELAYS_MS[attempt];
+    term.write(`\r\n\x1b[33m[connection lost, reconnecting in ${delay / 1000}s…]\x1b[0m\r\n`);
+    await new Promise((r) => setTimeout(r, delay));
+    try {
+      const next = await reconnect!();
+      channel = next;
+      wireIncoming(next);
+      term.write("\r\n\x1b[32m[reconnected]\x1b[0m\r\n");
+      // Re-send terminal size so the new PTY matches our viewport.
+      next.send(JSON.stringify({ t: "r", c: term.cols, r: term.rows }));
+    } catch (e) {
+      term.write(`\r\n\x1b[31m[reconnect attempt ${attempt + 1} failed: ${(e as Error).message}]\x1b[0m\r\n`);
+      void attemptReconnect(attempt + 1);
+    }
+  };
 
-  channel.addEventListener("close", () => {
-    term.write("\r\n\x1b[31m[connection closed]\x1b[0m\r\n");
-  });
+  wireIncoming(initialChannel);
 
   term.focus();
 }
