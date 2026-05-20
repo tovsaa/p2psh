@@ -1,0 +1,33 @@
+name: Feature request
+description: Propose something the project doesn't do yet.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing: check [SECURITY.md](https://github.com/tovsaa/p2psh/blob/main/SECURITY.md)'s
+        "Known limitations" table — some things are deliberately deferred and
+        the trade-offs are documented there.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What use case isn't covered? Why does it matter?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: |
+        Concrete sketch — wire format change, env var, CLI flag, new file.
+        "It would be cool if X" without a shape is hard to act on.
+    validations:
+      required: false
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Workarounds you tried, other designs you'd be OK with.
+    validations:
+      required: false

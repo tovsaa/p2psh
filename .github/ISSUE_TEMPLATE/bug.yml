@@ -1,0 +1,66 @@
+name: Bug report
+description: Something doesn't work the way the docs say it should.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing. Please include enough detail that the bug can be
+        reproduced without follow-up. Security-sensitive reports: see
+        [SECURITY.md](https://github.com/tovsaa/p2psh/blob/main/SECURITY.md)
+        instead — don't use this template for those.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, what did you get?
+    validations:
+      required: true
+  - type: dropdown
+    id: side
+    attributes:
+      label: Where did it happen?
+      multiple: true
+      options:
+        - Web client (browser)
+        - CLI client (npm run client)
+        - Server (npm run server / docker)
+        - nym-client / mixnet
+        - CI / build / docker image
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: P2PSH version
+      description: Git SHA, release tag, or image digest. `docker image inspect ghcr.io/tovsaa/p2psh:... | grep -i created` if you're not sure.
+      placeholder: "v0.1.1 / sha-abcdef1 / ghcr.io/tovsaa/p2psh@sha256:..."
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: Environment
+      description: OS, Node version (`node --version`), browser + version if web-side, docker version if container.
+      placeholder: "Debian 12, Node 22.5.1, Chrome 126, Docker 27.0"
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Server + client logs
+      description: |
+        Paste the relevant log lines. For server: `docker logs p2psh` or
+        `journalctl -u p2psh`. For web: the in-page log panel (`#log`) and
+        DevTools console errors. Trim secrets — never paste your private
+        ML-KEM/Ed25519 key.
+      render: shell
+    validations:
+      required: false
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction steps
+      description: Numbered steps that reliably trigger the bug.
+    validations:
+      required: false

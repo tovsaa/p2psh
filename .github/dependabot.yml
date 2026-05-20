@@ -1,0 +1,38 @@
+version: 2
+updates:
+  # Production npm deps — group into one PR per week so review stays scannable.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      noble:
+        # Treat the @noble/* crypto libs as a coordinated set so a security
+        # release doesn't show up in three separate PRs.
+        patterns:
+          - "@noble/*"
+      runtime:
+        patterns: ["*"]
+        exclude-patterns: ["@noble/*"]
+    # ML-KEM is pinned exact on purpose (see tests/ml-kem-kat.ts). Dependabot
+    # can still PR major/minor bumps, but a reviewer should re-run the KAT
+    # generator before merging.
+    ignore:
+      - dependency-name: "@noble/post-quantum"
+        update-types: ["version-update:semver-patch"]
+
+  # GitHub Actions referenced from workflows.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 3
+
+  # Dockerfile base images.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 2
