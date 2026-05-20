@@ -24,6 +24,7 @@ import { bringUpPeer } from "../shared/webrtc-peer.js";
 import { NymChannel } from "../shared/channel.js";
 import { attachShellToDataChannel } from "./ssh-bridge.js";
 import { encodeConnectString } from "../shared/connect-string.js";
+import { createRateLimiter } from "./limits.js";
 
 const IDENTITY_PATH = process.env.P2PSH_IDENTITY ?? "./data/server-identity.json";
 const NYM_URL = process.env.P2PSH_NYM_URL ?? "ws://127.0.0.1:1977";
@@ -156,25 +157,10 @@ async function main(): Promise<void> {
   const peers = new Map<string, PeerState>();
   const livePeers = new Set<string>(); // peer addresses currently mid-bring-up
 
-  // Sliding-window rate limiter keyed by replyTo: each map entry holds the
-  // timestamps of recent hello/resume attempts; entries older than the
-  // window are dropped on read. Per-peer state grows with peer churn but
-  // each entry is small (an array of numbers) and we GC-prune in the
-  // hello/resume handlers below.
-  const RATE_WINDOW_MS = 60_000;
-  const recentAttempts = new Map<string, number[]>();
-  const checkRate = (replyTo: string): boolean => {
-    const now = Date.now();
-    const cutoff = now - RATE_WINDOW_MS;
-    const arr = (recentAttempts.get(replyTo) ?? []).filter((t) => t >= cutoff);
-    if (arr.length >= RATE_PER_MIN) {
-      recentAttempts.set(replyTo, arr); // keep pruned state
-      return false;
-    }
-    arr.push(now);
-    recentAttempts.set(replyTo, arr);
-    return true;
-  };
+  // Sliding-window rate limiter keyed by replyTo. See src/server/limits.ts;
+  // factored out so tests can drive it through an injected clock without
+  // spinning up a full server.
+  const rateLimiter = createRateLimiter({ max: RATE_PER_MIN, windowMs: 60_000 });
 
   const tearDownPeer = (peerAddr: string): void => {
     const old = peers.get(peerAddr);
@@ -257,7 +243,7 @@ async function main(): Promise<void> {
   // *attached* peers (post-handshake); livePeers.size catches the in-flight
   // bringups so we don't admit more than we can build out.
   const admit = (replyTo: string): boolean => {
-    if (!checkRate(replyTo)) {
+    if (!rateLimiter.check(replyTo)) {
       const err: ServerError = {
         t: "error",
         code: "bad-request",
