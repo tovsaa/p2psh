@@ -16,7 +16,10 @@ import {
 import { Msg, TransportChoice, b64uDecode, b64uEncode } from "../../src/shared/protocol.js";
 import { Signal } from "../../src/shared/signaling.js";
 import { decodeConnectString } from "../../src/shared/connect-string.js";
-import { NymBrowserTransport } from "./nym-browser.js";
+// Type-only import: erased at build time. The Nym SDK is heavy (~5 MB
+// including WASM), so we lazy-load the runtime module on Connect click —
+// see the dynamic `import("./nym-browser.js")` inside run().
+import type { NymBrowserTransport } from "./nym-browser.js";
 import { NymChannel, Channel } from "../../src/shared/channel.js";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
@@ -193,6 +196,8 @@ async function run(): Promise<void> {
   if (!raw) throw new Error("paste the connect string from the server");
   const { addr: serverAddr, kemPk: serverPkB64, idPk: serverIdPkB64 } = decodeConnectString(raw);
 
+  log("loading Nym SDK (WASM)…");
+  const { NymBrowserTransport } = await import("./nym-browser.js");
   log("starting Nym mixnet client (WASM)...");
   const nym = new NymBrowserTransport();
   await nym.connect();
@@ -415,13 +420,18 @@ function attachTerminal(channel: Channel): void {
   const fit = new FitAddon();
   term.loadAddon(fit);
   term.open($("term"));
-  fit.fit();
-
+  // term.open() schedules layout; fit.fit() measures the container's
+  // computed size. Calling fit synchronously can land before the browser
+  // has applied the CSS pass, producing a 1-column terminal. Defer to the
+  // next animation frame so layout is settled.
   const sendResize = (): void => {
     if (channel.readyState !== "open") return;
     channel.send(JSON.stringify({ t: "r", c: term.cols, r: term.rows }));
   };
-  sendResize();
+  requestAnimationFrame(() => {
+    fit.fit();
+    sendResize();
+  });
   window.addEventListener("resize", () => {
     fit.fit();
     sendResize();
