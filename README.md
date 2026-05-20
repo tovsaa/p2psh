@@ -91,6 +91,32 @@ sudo journalctl -u p2psh -f
 See the Quick start above — fine for trying it out, less convenient for
 long-running deployments because you have to manage the container by hand.
 
+### Building for arm64
+
+The published image is **amd64 only**: upstream `nymtech/nym` ships a
+single x86-64 binary for each release, with no arch suffix in the asset
+name. Trying to build the project's `Dockerfile` with `--platform
+linux/arm64` will now fail fast with a clear error rather than silently
+package an x86-64 ELF into an arm64 image.
+
+To produce an arm64 image, build `nym-client` from source on an arm64
+host (or with cross-compilation) and stage it into the image:
+
+```bash
+# On an arm64 host with rustc installed:
+git clone --depth 1 --branch nym-binaries-v2026.9-venaco https://github.com/nymtech/nym
+cd nym && cargo build --release -p nym-client
+cp target/release/nym-client ../p2psh/nym-client-arm64
+
+# Then in p2psh/, swap the upstream wget for a local COPY in Dockerfile's
+# Stage 2 and `docker build --platform linux/arm64 .`. The rest of the
+# image already supports arm64 (node:22-slim is multi-arch).
+```
+
+Long-term, when upstream nymtech/nym starts shipping arm64 release
+artifacts, the Dockerfile can be flipped back to a fan-out `case` and the
+container.yml workflow's `platforms:` extended to `linux/amd64,linux/arm64`.
+
 ## Web client
 
 Hosted at <https://tovsaa.github.io/p2psh/> via the `pages` workflow in this

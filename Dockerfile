@@ -31,16 +31,28 @@ ARG TARGETARCH
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates wget \
     && rm -rf /var/lib/apt/lists/*
-# Upstream publishes only the host arch from their CI runner. amd64 is always
-# present; arm64 builds are sporadic. For arm64 hosts you may need to rebuild
-# nym-client from source — see README for the build instructions.
+# Upstream nymtech/nym publishes only an amd64 ELF; the bare `nym-client`
+# asset name carries no arch suffix but `file` reports `x86-64`. There's no
+# official arm64 / armhf binary. For ARM hosts: build nym-client from source
+# (cargo build --release -p nym-client; see README "Building for arm64") and
+# either:
+#   a) build this image on an ARM host with a pre-fetched binary at
+#      ./nym-client (replace the wget below with `COPY nym-client ...`), or
+#   b) use a multi-stage rust:slim builder to compile inside the image.
+# We refuse to silently package an amd64 binary into an arm64 image — that
+# would produce a container that "starts" but crashes the moment Linux
+# tries to ld-linux-x86-64.so.2 it.
 RUN case "$TARGETARCH" in \
-        amd64) suffix="" ;; \
-        arm64) suffix="" ;; \
-        *) echo "unsupported arch: $TARGETARCH"; exit 1 ;; \
-    esac \
-    && wget -q "https://github.com/nymtech/nym/releases/download/${NYM_VERSION}/nym-client${suffix}" -O /usr/local/bin/nym-client \
-    && chmod +x /usr/local/bin/nym-client
+        amd64) \
+            wget -q "https://github.com/nymtech/nym/releases/download/${NYM_VERSION}/nym-client" -O /usr/local/bin/nym-client \
+            && chmod +x /usr/local/bin/nym-client \
+            ;; \
+        arm64|armhf|*) \
+            echo "ERROR: TARGETARCH=$TARGETARCH is not supported by the published Dockerfile." >&2; \
+            echo "Upstream nymtech/nym publishes amd64 only. See README 'Building for arm64'." >&2; \
+            exit 1 \
+            ;; \
+    esac
 
 # ---------- Stage 3: runtime ----------
 FROM node:22-slim
