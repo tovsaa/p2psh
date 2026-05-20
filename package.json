@@ -10,7 +10,7 @@
     "web": "vite --host 127.0.0.1 --port 5173 --strictPort",
     "build": "vite build",
     "typecheck": "tsc --noEmit",
-    "test": "tsx tests/ml-kem-kat.ts && tsx tests/aead.ts && tsx tests/handshake.ts"
+    "test": "tsx tests/ml-kem-kat.ts && tsx tests/protocol.ts && tsx tests/connect-string.ts && tsx tests/aead.ts && tsx tests/handshake.ts"
   },
   "dependencies": {
     "@noble/ciphers": "^1.2.1",
