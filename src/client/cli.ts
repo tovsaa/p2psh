@@ -109,12 +109,11 @@ async function main(): Promise<void> {
     session = await fullHandshake(nym, serverPk, serverIdPk, me);
   }
 
-  // Echo probe — the server attaches a PTY shell on whichever transport is
-  // selected, so the same probe works in both modes.
+  // Bring up the data channel.
   let channel: Channel;
   if (TRANSPORT === "nym") {
     channel = new NymChannel(nym, session, SERVER_ADDR!);
-    console.log("[client] Nym-tunneled channel open — sending probe.");
+    console.error("[client] Nym-tunneled channel open — entering interactive mode.");
   } else {
     const { dc } = await bringUpPeer({
       role: "offerer",
@@ -123,14 +122,75 @@ async function main(): Promise<void> {
       remoteAddr: SERVER_ADDR!,
     });
     channel = dc;
-    console.log("[client] WebRTC DataChannel open — sending probe.");
+    console.error("[client] WebRTC DataChannel open — entering interactive mode.");
   }
+  await runInteractive(channel);
+}
+
+// Bridges process.stdin/stdout to the data channel, the same wire format the
+// browser terminal uses ({t:"i",d}, {t:"o",d}, {t:"r",c,r}).
+//
+// On a TTY: raw mode so keystrokes (including Ctrl+C, arrow keys, escape
+// sequences) pass through to the remote PTY untouched, and SIGWINCH gets
+// translated into a resize frame. To exit, run `exit` in the remote shell —
+// it kills the PTY which closes the channel which exits us.
+//
+// On a pipe (e.g. `echo "ls -la" | npm run client`): line mode; we still
+// forward stdin to the channel byte-for-byte, but stop when stdin EOFs.
+// Useful for one-shot remote command execution from scripts.
+async function runInteractive(channel: Channel): Promise<void> {
+  const isTTY = process.stdin.isTTY === true && process.stdout.isTTY === true;
+
+  const sendInput = (chunk: string): void => {
+    if (channel.readyState !== "open") return;
+    channel.send(JSON.stringify({ t: "i", d: chunk }));
+  };
+
+  const sendResize = (): void => {
+    if (channel.readyState !== "open") return;
+    const c = process.stdout.columns ?? 80;
+    const r = process.stdout.rows ?? 24;
+    channel.send(JSON.stringify({ t: "r", c, r }));
+  };
+
   channel.addEventListener("message", (ev) => {
     const text = typeof ev.data === "string" ? ev.data : new TextDecoder().decode(ev.data);
-    console.log(`[client] channel recv: ${text.slice(0, 120)}${text.length > 120 ? "..." : ""}`);
-    setTimeout(() => process.exit(0), 200);
+    let msg: { t?: string; d?: string };
+    try { msg = JSON.parse(text); } catch { return; }
+    if (msg.t === "o" && typeof msg.d === "string") {
+      process.stdout.write(msg.d);
+    }
   });
-  channel.send(JSON.stringify({ t: "i", d: "\r" }));
+
+  const cleanup = (code = 0): void => {
+    if (isTTY) {
+      try { process.stdin.setRawMode(false); } catch { /* not a TTY */ }
+    }
+    try { process.stdin.pause(); } catch { /* ignore */ }
+    // Give the last AEAD frame a moment to flush over Nym if we're closing
+    // mid-burst.
+    setTimeout(() => process.exit(code), 50);
+  };
+
+  channel.addEventListener("close", () => {
+    process.stdout.write("\r\n[connection closed]\r\n");
+    cleanup(0);
+  });
+
+  if (isTTY) {
+    process.stdin.setRawMode(true);
+    sendResize();
+    process.stdout.on("resize", sendResize);
+  }
+  process.stdin.setEncoding("utf8");
+  process.stdin.on("data", (chunk: Buffer | string) => {
+    sendInput(typeof chunk === "string" ? chunk : chunk.toString("utf8"));
+  });
+  // For piped stdin: when the producer EOFs, we wrap up. For a real TTY,
+  // 'end' only fires after Ctrl+D *and* nothing else holds stdin open — in
+  // practice it's safe to treat as a request to exit.
+  process.stdin.on("end", () => cleanup(0));
+  process.stdin.resume();
 }
 
 function attemptResume(

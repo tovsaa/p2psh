@@ -196,7 +196,17 @@ Run server, web, and (optionally) a Node CLI client in three terminals:
 ```bash
 npm run server          # server, advertises a p2psh1:// connect string
 npm run web             # Vite dev server at http://127.0.0.1:5173
-P2PSH_CONNECT=p2psh1://… npm run client   # CLI smoke test
+P2PSH_CONNECT=p2psh1://… npm run client   # interactive Node CLI client
+```
+
+The CLI client puts the local terminal into raw mode and tunnels every
+keystroke through to the remote shell (Ctrl+C, arrow keys, escape
+sequences pass through). Type `exit` in the remote shell to disconnect.
+For non-interactive use, pipe input in — the same client works for
+scripted one-shot commands:
+
+```bash
+echo "ls -la" | P2PSH_CONNECT=p2psh1://… npm run client > out.txt
 ```
 
 The server needs a `nym-client` reachable on `P2PSH_NYM_URL`. Inside the Docker
