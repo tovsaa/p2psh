@@ -44,30 +44,39 @@ RUN case "$TARGETARCH" in \
 
 # ---------- Stage 3: runtime ----------
 FROM node:22-slim
-WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates tini \
-    && rm -rf /var/lib/apt/lists/*
+# `node:22-slim` ships yarn at /opt/yarn-* (~7 MB) which we don't use — pure
+# npm. Drop it together with the apt install in a single RUN so the cleanup
+# stays in the same layer, plus add /data with the right ownership while
+# we're at it (avoids a 200+ MB `chown -R` layer over /app later).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates tini \
+    && rm -rf /var/lib/apt/lists/* \
+    && rm -rf /opt/yarn-* /usr/local/bin/yarn /usr/local/bin/yarnpkg \
+    && mkdir -p /data /app \
+    && chown node:node /data /app
+
+WORKDIR /app
 
 # `node:22-slim` already ships a non-root `node` user (UID 1000). Reuse it so
 # the image works on hosts that bind-mount paths owned by 1000.
+# Use --chown on every COPY so the file ownership is set in-place (single
+# layer per copy) rather than walking the tree afterwards. The old
+# `chown -R node:node /app` rewrote permission bits on the ~190 MB
+# node_modules tree, which made it a second copy in a new layer.
 COPY --from=nym  /usr/local/bin/nym-client /usr/local/bin/nym-client
-COPY --from=deps /app/node_modules ./node_modules
-COPY package.json tsconfig.json ./
-COPY src ./src
+COPY --chown=node:node --from=deps /app/node_modules ./node_modules
+COPY --chown=node:node package.json tsconfig.json ./
+COPY --chown=node:node src ./src
+COPY docker/entrypoint.sh /usr/local/bin/p2psh-entrypoint
+RUN chmod +x /usr/local/bin/p2psh-entrypoint
 
-# Identity + nym-client state live here; mount a volume to persist across runs.
-RUN mkdir -p /data && chown -R node:node /data /app
 ENV P2PSH_IDENTITY=/data/server-identity.json \
     P2PSH_NYM_URL=ws://127.0.0.1:1977 \
     P2PSH_SHELL=bash \
     P2PSH_SHELL_ARGS="" \
     NYM_CLIENT_ID=p2psh \
     HOME=/data/home
-
-COPY docker/entrypoint.sh /usr/local/bin/p2psh-entrypoint
-RUN chmod +x /usr/local/bin/p2psh-entrypoint
 
 USER node
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/p2psh-entrypoint"]
