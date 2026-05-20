@@ -135,6 +135,7 @@ Server-side env vars (set with `-e` on `docker run`):
 | `P2PSH_SHELL_ARGS`   | (empty)                            | space-separated args, e.g. `-l` for a login shell    |
 | `P2PSH_RESTRICT`     | (unset)                            | set to `1` to swap `bash` for `rbash` on POSIX       |
 | `P2PSH_AUDIT_LOG`    | (unset)                            | path to append per-peer keystroke audit lines        |
+| `P2PSH_EPHEMERAL_HOME` | (unset)                          | set to `1` to spawn each session in a fresh `mkdtemp` `$HOME` that's wiped on disconnect |
 | `P2PSH_TRANSPORT`    | `any`                              | allowlist of data-plane transports the server accepts: `any`, `webrtc`, `nym`, or comma list |
 | `P2PSH_WEB_URL`      | (unset)                            | public web-client URL; if set, the server also prints a ready-to-share deep link |
 | `NYM_CLIENT_ID`      | `p2psh`                            | nym-client config id (under `$HOME/.nym/clients/`)   |
@@ -207,6 +208,14 @@ host credentials like `AWS_*`, `GITHUB_TOKEN`, `SSH_AUTH_SOCK` are dropped
 before `spawn`. Set `P2PSH_RESTRICT=1` to switch to `rbash` on POSIX. Set
 `P2PSH_AUDIT_LOG=/var/log/p2psh-audit.log` to record every keystroke line
 with an ISO timestamp and a short peer label.
+
+Set `P2PSH_EPHEMERAL_HOME=1` to give each session a fresh `mkdtemp` `$HOME`
+(e.g. `/tmp/p2psh-9YupkyS9-XXXXXX`) that's removed on disconnect. The peer
+can't read your `~/.bashrc`, `~/.bash_history`, `~/.ssh/known_hosts`, or
+anything else under the host user's real home. Works alongside
+`P2PSH_RESTRICT`; doesn't replace OS-level isolation (the shell can still
+`cd /` and read whatever the process's uid can — pair with the systemd unit
+in [`deploy/`](deploy/) or a per-session container for that).
 
 ## Development
 

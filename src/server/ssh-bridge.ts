@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 import { spawn, IPty } from "node-pty";
 import { appendFile } from "node:fs/promises";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Channel, ChannelMessageEvent } from "../shared/channel.js";
 
 // Wire format over the DataChannel (JSON text frames):
@@ -38,6 +41,7 @@ const SHELL_ARGS_ENV = process.env.P2PSH_SHELL_ARGS;
 const SHELL_ARGS = SHELL_ARGS_ENV ? SHELL_ARGS_ENV.split(" ").filter((s) => s.length > 0) : [];
 const RESTRICT = process.env.P2PSH_RESTRICT === "1";
 const AUDIT_LOG_PATH = process.env.P2PSH_AUDIT_LOG;
+const EPHEMERAL_HOME = process.env.P2PSH_EPHEMERAL_HOME === "1";
 
 function resolveShell(): { cmd: string; args: string[] } {
   // P2PSH_RESTRICT=1 swaps in rbash on POSIX (no-op on Windows / when the user
@@ -66,6 +70,37 @@ export function attachShellToDataChannel(
   const { cmd, args } = resolveShell();
   const env = buildShellEnv();
 
+  // Ephemeral HOME: if P2PSH_EPHEMERAL_HOME=1, redirect the spawned shell
+  // into a fresh empty directory that gets nuked on session end. Stops a
+  // peer from reading the host user's ~/.bashrc, ~/.bash_history,
+  // ~/.ssh/known_hosts, repo state, etc. The dir is mkdtemp'd
+  // synchronously so it's in place before spawn — the shell sees the
+  // new HOME from prompt one.
+  //
+  // Caveats this does NOT cover:
+  //   - The peer can still cd into anywhere on the filesystem the shell
+  //     user can read. Combine with rbash (P2PSH_RESTRICT=1) or a
+  //     dedicated unprivileged user (deploy/p2psh.service) for actual
+  //     filesystem isolation.
+  //   - bash's HISTFILE defaults to $HOME/.bash_history, so per-session
+  //     command history vanishes with the dir; if you wanted central
+  //     auditing, P2PSH_AUDIT_LOG records keystrokes regardless.
+  let ephemeralDir: string | null = null;
+  if (EPHEMERAL_HOME) {
+    try {
+      // peerLabel can contain base64url chars (incl. '/' on raw addresses
+      // before slicing). The slice in main.ts strips those, but defend
+      // against future callers by sanitizing.
+      const tag = peerLabel.replace(/[^a-zA-Z0-9_-]/g, "_");
+      ephemeralDir = mkdtempSync(join(tmpdir(), `p2psh-${tag}-`));
+      env.HOME = ephemeralDir;
+      env.PWD = ephemeralDir;
+    } catch (e) {
+      console.error(`[ssh-bridge:${peerLabel}] ephemeral home setup failed:`, e);
+      // Fall through to normal HOME — better degraded session than no session.
+    }
+  }
+
   const pty = spawn(cmd, args, {
     name: "xterm-256color",
     cols: 80,
@@ -73,6 +108,17 @@ export function attachShellToDataChannel(
     cwd: env.HOME || env.USERPROFILE || process.cwd(),
     env,
   });
+
+  const removeEphemeral = (): void => {
+    if (!ephemeralDir) return;
+    const dir = ephemeralDir;
+    ephemeralDir = null;
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch (e) {
+      console.error(`[ssh-bridge:${peerLabel}] ephemeral home cleanup failed:`, e);
+    }
+  };
 
   // Audit log buffers per-peer (not module-level — would interleave across peers).
   // Flushes on newline; truncated trailing line is flushed on dc close.
@@ -108,6 +154,7 @@ export function attachShellToDataChannel(
     } catch (e) {
       console.error(`[ssh-bridge:${peerLabel}] dc.close after exit:`, e);
     }
+    removeEphemeral();
   });
 
   dc.addEventListener("message", (ev: ChannelMessageEvent) => {
@@ -138,6 +185,12 @@ export function attachShellToDataChannel(
     } catch (e) {
       console.error(`[ssh-bridge:${peerLabel}] pty.kill on dc close:`, e);
     }
+    // Belt-and-suspenders: pty.onExit will also fire and call this, but
+    // a quickly-closing dc before the shell has produced any output can
+    // race with the kill — explicit cleanup here ensures we don't leak
+    // tmp dirs even if the PTY's exit event never fires (eg the OS
+    // killed it before we could).
+    removeEphemeral();
   });
 
   return pty;
