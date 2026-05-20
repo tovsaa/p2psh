@@ -52,6 +52,45 @@ browser, click Connect. After a few seconds a live shell on the server appears.
 The `p2psh-data` volume holds the server's identity and `nym-client`
 gateway registration; keep it across restarts to preserve session resume.
 
+## Deployment
+
+Three supported shapes, pick whichever fits:
+
+### 1. Docker Compose (recommended for self-hosting)
+
+```bash
+git clone https://github.com/tovsaa/p2psh && cd p2psh/deploy
+docker compose up -d
+docker compose logs -f p2psh    # copy the p2psh1:// connect string
+```
+
+`deploy/docker-compose.yml` pins a tagged release, mounts a persistent
+volume, sets the restart policy, and exposes every relevant env var with
+inline comments (transport allowlist, hardening flags, shell choice). Edit
+the file in place — it's intended to be your local configuration.
+
+### 2. systemd (bare-metal / VM, no Docker)
+
+Use `deploy/nym-client.service` + `deploy/p2psh.service` for a setup where
+the Node server runs natively against a system-installed `nym-client`.
+Both units run as a dedicated unprivileged `p2psh` user and apply
+systemd-level sandboxing (`ProtectSystem`, `NoNewPrivileges`,
+`PrivateTmp`, …) on top of the in-process env scrub. See the comments at
+the top of each unit file for the one-time setup (create the user,
+`nym-client init`, install paths). Then:
+
+```bash
+sudo cp deploy/{nym-client,p2psh}.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now nym-client p2psh
+sudo journalctl -u p2psh -f
+```
+
+### 3. Single `docker run` (quickest smoke test)
+
+See the Quick start above — fine for trying it out, less convenient for
+long-running deployments because you have to manage the container by hand.
+
 ## Web client
 
 Hosted at <https://tovsaa.github.io/p2psh/> via the `pages` workflow in this

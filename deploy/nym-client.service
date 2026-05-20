@@ -1,0 +1,36 @@
+# /etc/systemd/system/nym-client.service
+#
+# Companion to p2psh.service: keeps the local nym-client gateway connection
+# alive on a bare-metal/VM host. Uses the same `p2psh` system user.
+#
+# Prereqs:
+#   - `nym-client` binary on PATH (https://github.com/nymtech/nym/releases)
+#   - `sudo -u p2psh nym-client init --id p2psh` was run once
+
+[Unit]
+Description=Nym mixnet client (local WS gateway for P2PSH)
+Documentation=https://nymtech.net/docs/clients/native-client.html
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=p2psh
+Group=p2psh
+
+ExecStart=/usr/local/bin/nym-client run --id p2psh
+Restart=on-failure
+RestartSec=10s
+
+# nym-client doesn't need anything outside its own state dir.
+NoNewPrivileges=true
+ProtectSystem=strict
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+ReadWritePaths=/home/p2psh
+
+[Install]
+WantedBy=multi-user.target

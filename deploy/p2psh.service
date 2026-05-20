@@ -1,0 +1,73 @@
+# /etc/systemd/system/p2psh.service
+#
+# Bare-metal / VM deployment: runs the Node server against an external
+# `nym-client` (you start that one separately, see ExecStartPre or a
+# sibling nym-client.service unit). Useful when you'd rather not have
+# Docker on the host, or when you want to use a non-default shell that
+# the container image doesn't ship.
+#
+# Prereqs:
+#   - Node.js 22+
+#   - `nym-client` binary on PATH (https://github.com/nymtech/nym/releases)
+#   - Repo cloned to /opt/p2psh and `npm ci --omit=dev` already run there
+#   - A dedicated unprivileged user `p2psh` exists (`useradd --system --create-home p2psh`)
+#   - `nym-client init --id p2psh` was run once as that user
+#
+# Setup:
+#   sudo cp deploy/p2psh.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now p2psh
+#   sudo journalctl -u p2psh -f         # copy the connect string
+#
+# To rotate the server identity: stop the unit, remove
+# /home/p2psh/.local/share/p2psh/server-identity.json, restart.
+
+[Unit]
+Description=P2PSH — P2P SSH over WebRTC with Nym signaling
+Documentation=https://github.com/tovsaa/p2psh
+# nym-client must be up before we try to connect to its local WS.
+After=network-online.target nym-client.service
+Wants=network-online.target nym-client.service
+
+[Service]
+Type=simple
+User=p2psh
+Group=p2psh
+
+WorkingDirectory=/opt/p2psh
+ExecStart=/usr/bin/node --import tsx/esm src/server/main.ts
+
+Restart=on-failure
+RestartSec=5s
+
+# Where the server's identity + future persistent state lives. Keep this
+# under the user's data dir so a hostile peer's shell can't read it from
+# $HOME.
+Environment=P2PSH_IDENTITY=/home/p2psh/.local/share/p2psh/server-identity.json
+Environment=P2PSH_NYM_URL=ws://127.0.0.1:1977
+Environment=P2PSH_TRANSPORT=any
+# Adjust to whichever shell you actually want peers to land in:
+Environment=P2PSH_SHELL=/bin/bash
+# Uncomment to enable rbash:
+# Environment=P2PSH_RESTRICT=1
+# Uncomment to record keystrokes:
+# Environment=P2PSH_AUDIT_LOG=/var/log/p2psh-audit.log
+
+# --- Sandboxing (systemd-level; orthogonal to in-process env scrub) ---
+# These limit what the spawned shell process can do at the OS level.
+# Comment out if you actually want peers to write outside /home/p2psh.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=tristate          # /home/p2psh stays writable; other /home read-only
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictNamespaces=true
+# `ReadWritePaths` is the only place under /home/p2psh that can be written.
+ReadWritePaths=/home/p2psh /var/log
+
+[Install]
+WantedBy=multi-user.target

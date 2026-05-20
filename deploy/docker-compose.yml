@@ -1,0 +1,46 @@
+# Persistent self-hosted P2PSH server.
+#
+# Usage:
+#   cd deploy/
+#   docker compose up -d
+#   docker compose logs -f          # copy the p2psh1:// connect string
+#   docker compose down             # stop (volume + identity persist)
+#
+# Set P2PSH_WEB_URL below to the public web client you'll use (the docker
+# image will print a one-click deep-link with #c=<connect string> alongside
+# the plain connect string).
+
+services:
+  p2psh:
+    # Pin to a tagged release for reproducibility. Bump as new versions ship.
+    image: ghcr.io/tovsaa/p2psh:v0.1.0
+    container_name: p2psh
+    restart: unless-stopped
+
+    # The named volume preserves the server's ML-KEM + Ed25519 identity
+    # and the local nym-client's gateway registration across restarts.
+    # Wipe it to rotate the identity (clients will need a new connect string).
+    volumes:
+      - p2psh-data:/data
+
+    environment:
+      # Hosted web client. Comment out if you self-host the static bundle.
+      P2PSH_WEB_URL: https://tovsaa.github.io/p2psh
+
+      # Transport allowlist: any | webrtc | nym | comma-list.
+      # any  = both; client picks per session (default, recommended).
+      # nym  = force the mixnet tunnel (server's IP is never exposed via
+      #        STUN; latency is mixnet-bound).
+      # webrtc = direct P2P only; reject Nym requests.
+      P2PSH_TRANSPORT: any
+
+      # Optional shell hardening. Uncomment to enable rbash + audit log:
+      # P2PSH_RESTRICT: "1"
+      # P2PSH_AUDIT_LOG: /data/audit.log
+
+      # Optional shell tweaks:
+      # P2PSH_SHELL: bash
+      # P2PSH_SHELL_ARGS: "-l"
+
+volumes:
+  p2psh-data:
