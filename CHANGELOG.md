@@ -2,6 +2,43 @@
 
 All notable changes go here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [v0.2.0] — 2026-05-20
+
+### Added
+- **Interactive CLI client** (`npm run client`): raw stdin/stdout
+  passthrough to the remote PTY, SIGWINCH-driven resize frames, clean
+  exit on remote disconnect or stdin EOF. Pipe mode supported for
+  one-shot remote command execution (`echo "ls" | npm run client`).
+- **Browser auto-reconnect** with exponential backoff (2 s / 5 s / 15 s,
+  then give up). The xterm instance and the WASM Nym SDK survive across
+  reconnects; only the AEAD session + data channel are rebuilt. Status
+  surfaces in the terminal with ANSI colors.
+- **`P2PSH_EPHEMERAL_HOME=1`**: each spawned shell lands in a fresh
+  `mkdtemp` `$HOME` (e.g. `/tmp/p2psh-<peer>-XXXXXX`) that's wiped on
+  disconnect. Stops a peer from reading the server user's `~/.bashrc`,
+  `~/.bash_history`, `~/.ssh/known_hosts`, etc.
+- **`tests/protocol.ts`** (30 checks) + **`tests/connect-string.ts`**
+  (14 checks): nonce layout, b64u URL-safety, DIR_C2S/DIR_S2C
+  distinctness, connect string roundtrip + malformed input rejection.
+- **Project hygiene**: CHANGELOG, CONTRIBUTING, .editorconfig,
+  `.github/ISSUE_TEMPLATE/*`, PR template, Dependabot config (weekly
+  npm with grouped Noble updates; @noble/post-quantum patches ignored
+  because KAT bytes need regenerating per bump).
+
+### Changed
+- **Web initial bundle: 412 KB → 71 KB** (-83%). Lazy-load xterm.js +
+  addon-fit on Connect, so the NAT probe + initial paint don't wait on
+  them. The total payload is unchanged; it's just split.
+- **Docker arm64 build now fails fast** with a clear error pointing to
+  the README "Building for arm64" section. Previously it silently
+  packaged the upstream amd64 ELF into an arm64 image, producing a
+  container that would crash on Linux start.
+
+### Documented
+- README "Building for arm64" — manual `cargo build -p nym-client` path,
+  local-COPY hot-patch in the Dockerfile, and a note that the workflow
+  flips back to multi-arch once nymtech/nym ships arm64 binaries.
+
 ## [v0.1.1] — 2026-05-20
 
 ### Changed
@@ -68,5 +105,6 @@ First tagged release.
   Windows checkout can't break the Docker entrypoint shebang again.
 - **`SPDX-License-Identifier: Apache-2.0`** headers on every source file.
 
+[v0.2.0]: https://github.com/tovsaa/p2psh/releases/tag/v0.2.0
 [v0.1.1]: https://github.com/tovsaa/p2psh/releases/tag/v0.1.1
 [v0.1.0]: https://github.com/tovsaa/p2psh/releases/tag/v0.1.0
