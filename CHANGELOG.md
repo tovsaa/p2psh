@@ -2,7 +2,7 @@
 
 All notable changes go here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [v0.3.0] — 2026-05-22
 
 ### Changed — **wire-breaking**
 - **Hybrid ML-KEM-768 + X25519 key exchange.** Every full handshake now

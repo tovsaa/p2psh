@@ -10,6 +10,12 @@ export default defineConfig({
     outDir: "../dist",
     emptyOutDir: true,
     target: "es2022",
+    // The Nym browser SDK bundle is ~6.7 MB (2.8 MB gzip) because it inlines
+    // a WASM mixnet client. That's intrinsic to the dependency — code-splitting
+    // can't shrink it further than the existing dynamic import in main.ts.
+    // Raise the warning threshold to match reality so CI logs aren't dominated
+    // by a known false positive.
+    chunkSizeWarningLimit: 7000,
   },
   server: {
     port: 5173,
