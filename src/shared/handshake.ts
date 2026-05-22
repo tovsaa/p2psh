@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
-import { ml_kem768 } from "@noble/post-quantum/ml-kem";
-import { chacha20poly1305 } from "@noble/ciphers/chacha";
-import { ed25519 } from "@noble/curves/ed25519";
-import { hkdf } from "@noble/hashes/hkdf";
-import { sha256 } from "@noble/hashes/sha2";
+import { ml_kem768 } from "@noble/post-quantum/ml-kem.js";
+import { chacha20poly1305 } from "@noble/ciphers/chacha.js";
+import { ed25519 } from "@noble/curves/ed25519.js";
+import { hkdf } from "@noble/hashes/hkdf.js";
+import { sha256 } from "@noble/hashes/sha2.js";
 import {
   AppData,
   ClientHello,
@@ -18,7 +18,7 @@ import {
   b64uEncode,
   nonceFor,
 } from "./protocol.js";
-import { randomBytes } from "@noble/hashes/utils";
+import { randomBytes } from "@noble/hashes/utils.js";
 
 const HKDF_INFO_SESSION_KEY = new TextEncoder().encode("p2psh/v0/session-key");
 const HKDF_INFO_SESSION_ID = new TextEncoder().encode("p2psh/v0/session-id");
@@ -74,13 +74,12 @@ export interface ServerIdentity {
 
 export function generateServerIdentity(): ServerIdentity {
   const kem = ml_kem768.keygen();
-  const idSecretKey = ed25519.utils.randomPrivateKey();
-  const idPublicKey = ed25519.getPublicKey(idSecretKey);
+  const id = ed25519.keygen();
   return {
     publicKey: kem.publicKey,
     secretKey: kem.secretKey,
-    idPublicKey,
-    idSecretKey,
+    idPublicKey: id.publicKey,
+    idSecretKey: id.secretKey,
   };
 }
 
@@ -180,18 +179,72 @@ export function clientInitiate(
 // --- Resumption (client) -----------------------------------------------------
 
 /**
- * Persistent state a client needs to attempt a resume. Both fields are produced
- * by `extractResumeState` once a handshake (or previous resume) has completed.
+ * Persistent state a client needs to attempt a resume. The two cryptographic
+ * fields (sessionId, key) are produced by `extractResumeState` once a handshake
+ * (or previous resume) completes. The two policy fields (`establishedAt`,
+ * `resumeCount`) let the client cap chain length: each HKDF rotation gives
+ * only one-step post-compromise security, so a chain of arbitrarily many
+ * resumes against a long-lived key is bounded PFS at best. Tearing down the
+ * chain on a schedule (max-age) or count (max-count) forces a fresh ML-KEM
+ * exchange and a fully independent new key.
+ *
+ * Both policy fields are optional for wire/disk backward-compat with state
+ * files written before PFS rotation existed; missing values are treated as
+ * "established now, count 0" so legacy state gets a single grace resume
+ * before policy decisions kick in.
  */
 export interface ResumeState {
   sessionId: Uint8Array; // 16 bytes
   key: Uint8Array;       // 32 bytes — current rotated key
+  establishedAt?: number; // ms epoch when the current chain's full handshake completed
+  resumeCount?: number;   // number of resumes performed on this chain (0 = fresh)
+}
+
+/**
+ * Policy for forcing periodic full re-handshakes. Both limits are upper bounds
+ * on a single resume chain: hitting either causes the client to drop the saved
+ * state and run a full ML-KEM handshake instead, breaking forward dependence on
+ * any past key.
+ */
+export interface ResumePolicy {
+  maxAgeMs: number;  // chain expires this long after the full handshake
+  maxCount: number;  // chain expires after this many resumes
+}
+
+export const DEFAULT_RESUME_POLICY: ResumePolicy = {
+  maxAgeMs: 24 * 60 * 60 * 1000, // 24h
+  maxCount: 64,
+};
+
+/**
+ * Returns a non-null reason string if the chain should be torn down. The
+ * `nowMs` parameter is taken explicitly to keep this pure and testable; the
+ * caller passes `Date.now()` in production code.
+ */
+export function resumeExpiryReason(
+  state: ResumeState,
+  policy: ResumePolicy,
+  nowMs: number,
+): string | null {
+  const count = state.resumeCount ?? 0;
+  if (count >= policy.maxCount) return `resume count ${count} reached limit ${policy.maxCount}`;
+  const established = state.establishedAt;
+  if (established !== undefined) {
+    const age = nowMs - established;
+    if (age >= policy.maxAgeMs) return `resume chain age ${age}ms exceeded ${policy.maxAgeMs}ms`;
+  }
+  return null;
 }
 
 export function extractResumeStateFromHandshake(
   state: ClientHandshakeState,
 ): ResumeState {
-  return { sessionId: state.sessionId, key: state.sessionKey };
+  return {
+    sessionId: state.sessionId,
+    key: state.sessionKey,
+    establishedAt: Date.now(),
+    resumeCount: 0,
+  };
 }
 
 export interface ClientResumeAttempt {
@@ -233,8 +286,16 @@ export function clientVerifyResumeAck(ack: ResumeAck, attempt: ClientResumeAttem
   }
 }
 
-export function newResumeStateAfterResume(attempt: ClientResumeAttempt): ResumeState {
-  return { sessionId: attempt.sessionId, key: attempt.rotatedKey };
+export function newResumeStateAfterResume(
+  attempt: ClientResumeAttempt,
+  previous: ResumeState,
+): ResumeState {
+  return {
+    sessionId: attempt.sessionId,
+    key: attempt.rotatedKey,
+    establishedAt: previous.establishedAt,
+    resumeCount: (previous.resumeCount ?? 0) + 1,
+  };
 }
 
 export function clientVerifyAck(

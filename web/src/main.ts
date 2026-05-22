@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
+/// <reference types="vite/client" />
 import {
   ClientHandshakeState,
   ClientResumeAttempt,
+  DEFAULT_RESUME_POLICY,
   ResumeState,
   Session,
   clientInitiate,
@@ -12,6 +14,7 @@ import {
   encodeAppData,
   extractResumeStateFromHandshake,
   newResumeStateAfterResume,
+  resumeExpiryReason,
 } from "../../src/shared/handshake.js";
 import { Msg, TransportChoice, b64uDecode, b64uEncode } from "../../src/shared/protocol.js";
 import { Signal } from "../../src/shared/signaling.js";
@@ -48,7 +51,12 @@ function loadResumeState(serverIdPkB64: string): ResumeState | null {
   if (!raw) return null;
   try {
     const obj = JSON.parse(raw);
-    return { sessionId: b64uDecode(obj.sessionId), key: b64uDecode(obj.key) };
+    return {
+      sessionId: b64uDecode(obj.sessionId),
+      key: b64uDecode(obj.key),
+      establishedAt: typeof obj.establishedAt === "number" ? obj.establishedAt : undefined,
+      resumeCount: typeof obj.resumeCount === "number" ? obj.resumeCount : undefined,
+    };
   } catch {
     return null;
   }
@@ -60,6 +68,8 @@ function saveResumeState(serverIdPkB64: string, state: ResumeState): void {
     JSON.stringify({
       sessionId: b64uEncode(state.sessionId),
       key: b64uEncode(state.key),
+      establishedAt: state.establishedAt,
+      resumeCount: state.resumeCount,
     }),
   );
 }
@@ -84,7 +94,7 @@ function dropResumeState(serverIdPkB64: string): void {
 
 function selectedTransport(): TransportChoice {
   const checked = document.querySelector<HTMLInputElement>('input[name="transport"]:checked');
-  return checked?.value === "nym" ? "nym" : "webrtc";
+  return checked?.value === "webrtc" ? "webrtc" : "nym";
 }
 
 // Classify the local NAT against two independent STUN servers within a short
@@ -195,6 +205,9 @@ $<HTMLButtonElement>("go").addEventListener("click", () => {
   run().catch((e) => {
     log(`FATAL: ${e?.message ?? e}`);
     console.error(e);
+    // Re-enable on failure so the user can retry after a transient Nym SDK /
+    // network glitch without reloading the page.
+    $<HTMLButtonElement>("go").disabled = false;
   });
 });
 
@@ -223,13 +236,14 @@ async function run(): Promise<void> {
   // Nym SDK initialization across reconnects.
   const connectOnce = async (): Promise<Channel> => {
     const saved = loadResumeState(serverIdPkB64);
+    const expiryReason = saved ? resumeExpiryReason(saved, DEFAULT_RESUME_POLICY, Date.now()) : null;
     let session: Session;
-    if (saved) {
+    if (saved && !expiryReason) {
       log("found saved session — attempting resume...");
       const attempt = clientResume(saved, me, transport);
       nym.send(serverAddr, JSON.stringify(attempt.request));
       try {
-        session = await awaitResumeResult(nym, attempt, serverIdPkB64);
+        session = await awaitResumeResult(nym, attempt, saved, serverIdPkB64);
         log("resume OK — skipped full handshake.");
       } catch (e) {
         log(`resume failed (${(e as Error).message}); doing full handshake.`);
@@ -237,6 +251,10 @@ async function run(): Promise<void> {
         session = await fullHandshake(nym, serverPk, serverIdPk, serverIdPkB64, serverAddr, me, transport);
       }
     } else {
+      if (saved && expiryReason) {
+        log(`resume chain expired (${expiryReason}) — forcing full handshake for fresh PFS.`);
+        dropResumeState(serverIdPkB64);
+      }
       session = await fullHandshake(nym, serverPk, serverIdPk, serverIdPkB64, serverAddr, me, transport);
     }
 
@@ -256,6 +274,7 @@ async function run(): Promise<void> {
 function awaitResumeResult(
   nym: NymBrowserTransport,
   attempt: ClientResumeAttempt,
+  previous: ResumeState,
   serverIdPkB64: string,
 ): Promise<Session> {
   return new Promise((resolve, reject) => {
@@ -280,7 +299,7 @@ function awaitResumeResult(
           reject(e as Error);
           return;
         }
-        saveResumeState(serverIdPkB64, newResumeStateAfterResume(attempt));
+        saveResumeState(serverIdPkB64, newResumeStateAfterResume(attempt, previous));
         detach();
         resolve(attempt.session);
       }
@@ -364,7 +383,15 @@ async function runWebRTC(
     });
   };
 
-  nym.onMessage(async ({ text }) => {
+  // Nym is only used as a signaling carrier for SDP/ICE. Once the DataChannel
+  // is open the WebRTC path takes over — keeping this listener alive after
+  // that point leaks one extra Nym subscriber per reconnect, and forces each
+  // subsequent handshake frame through a stale `decodeAppData` against a
+  // session whose counters have moved on. We detach in three places:
+  //   - on successful DataChannel open (the happy path)
+  //   - on DataChannel error/close (cleanup)
+  //   - on RTCPeerConnection disconnect (cleanup)
+  const detachSignal = nym.onMessage(async ({ text }) => {
     let msg: Msg;
     try {
       msg = JSON.parse(text);
@@ -390,7 +417,7 @@ async function runWebRTC(
         if (signal.role === "offer") {
           const answer = await pc.createAnswer();
           await pc.setLocalDescription(answer);
-          sendSignal({ t: "sdp", role: "answer", sdp: pc.localDescription!.sdp! });
+          sendSignal({ t: "sdp", role: "answer", sdp: answer.sdp ?? "" });
         }
       } else if (signal.t === "ice") {
         if (signal.end) return;
@@ -406,16 +433,26 @@ async function runWebRTC(
 
   const offer = await pc.createOffer();
   await pc.setLocalDescription(offer);
-  sendSignal({ t: "sdp", role: "offer", sdp: pc.localDescription!.sdp! });
+  sendSignal({ t: "sdp", role: "offer", sdp: offer.sdp ?? "" });
 
   // Wait for the data channel to actually open before handing it back, so
   // the caller (connectOnce) doesn't try to send through a still-CONNECTING
   // channel.
-  await new Promise<void>((resolve, reject) => {
-    if (dc.readyState === "open") return resolve();
-    dc.addEventListener("open", () => resolve(), { once: true });
-    dc.addEventListener("error", (e) => reject(e), { once: true });
-  });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      if (dc.readyState === "open") return resolve();
+      dc.addEventListener("open", () => resolve(), { once: true });
+      dc.addEventListener("error", () => reject(new Error("DataChannel error")), { once: true });
+    });
+  } catch (e) {
+    detachSignal();
+    try { pc.close(); } catch { /* idempotent */ }
+    throw e;
+  }
+  detachSignal();
+  dc.addEventListener("close", () => {
+    try { pc.close(); } catch { /* idempotent */ }
+  }, { once: true });
   log("WebRTC DataChannel open.");
   return dc as unknown as Channel;
 }
@@ -442,13 +479,15 @@ async function attachTerminal(initialChannel: Channel, reconnect: ReconnectFn | 
   ]);
 
   let channel = initialChannel;
-  // Test hook: exposes the active channel and terminal on window so an
-  // e2e driver can simulate input without faking keyboard events. Safe to
-  // ship — it's just a reference, not extra capability. The getter ensures
-  // the hook follows reconnects.
-  (window as unknown as { __p2psh?: object }).__p2psh = {
-    get channel(): Channel { return channel; },
-  };
+  // Test hook: exposes the active channel on window so an e2e driver can
+  // simulate input without faking keyboard events. Gated behind `import.meta.env.DEV`
+  // so the production bundle does NOT expose a `channel.send` reference an
+  // XSS payload could grab to inject commands into the remote PTY.
+  if (import.meta.env.DEV) {
+    (window as unknown as { __p2psh?: object }).__p2psh = {
+      get channel(): Channel { return channel; },
+    };
+  }
 
   const term: TerminalType = new Terminal({
     convertEol: false,

@@ -5,15 +5,17 @@ import { dirname } from "node:path";
 import { createHash } from "node:crypto";
 import {
   ClientResumeAttempt,
+  DEFAULT_RESUME_POLICY,
+  ResumePolicy,
   ResumeState,
   Session,
   clientInitiate,
   clientResume,
   clientVerifyAck,
   clientVerifyResumeAck,
-  encodeAppData,
   extractResumeStateFromHandshake,
   newResumeStateAfterResume,
+  resumeExpiryReason,
 } from "../shared/handshake.js";
 import { NymTransport } from "../shared/nym-transport.js";
 import { Msg, TransportChoice, b64uDecode, b64uEncode } from "../shared/protocol.js";
@@ -23,8 +25,8 @@ import { decodeConnectString } from "../shared/connect-string.js";
 
 const NYM_URL = process.env.P2PSH_NYM_URL ?? "ws://127.0.0.1:1977";
 const TRANSPORT: TransportChoice = (() => {
-  const v = (process.env.P2PSH_TRANSPORT ?? "webrtc").toLowerCase();
-  return v === "nym" ? "nym" : "webrtc";
+  const v = (process.env.P2PSH_TRANSPORT ?? "nym").toLowerCase();
+  return v === "webrtc" ? "webrtc" : "nym";
 })();
 
 // Prefer the single bundled connect string; fall back to the legacy three
@@ -55,11 +57,23 @@ const STATE_PATH = (() => {
   return `./data/client-state-${hash}.json`;
 })();
 
+// Resume policy: env overrides exist mainly for tests / niche deployments;
+// the defaults (24h, 64 resumes) are what 99% of users want.
+const RESUME_POLICY: ResumePolicy = {
+  maxAgeMs: Number(process.env.P2PSH_RESUME_MAX_AGE_MS ?? DEFAULT_RESUME_POLICY.maxAgeMs),
+  maxCount: Number(process.env.P2PSH_RESUME_MAX_COUNT ?? DEFAULT_RESUME_POLICY.maxCount),
+};
+
 async function loadResumeState(): Promise<ResumeState | null> {
   if (!existsSync(STATE_PATH)) return null;
   try {
     const obj = JSON.parse(await readFile(STATE_PATH, "utf8"));
-    return { sessionId: b64uDecode(obj.sessionId), key: b64uDecode(obj.key) };
+    return {
+      sessionId: b64uDecode(obj.sessionId),
+      key: b64uDecode(obj.key),
+      establishedAt: typeof obj.establishedAt === "number" ? obj.establishedAt : undefined,
+      resumeCount: typeof obj.resumeCount === "number" ? obj.resumeCount : undefined,
+    };
   } catch {
     return null;
   }
@@ -72,6 +86,8 @@ async function saveResumeState(state: ResumeState): Promise<void> {
     JSON.stringify({
       sessionId: b64uEncode(state.sessionId),
       key: b64uEncode(state.key),
+      establishedAt: state.establishedAt,
+      resumeCount: state.resumeCount,
     }),
   );
 }
@@ -94,8 +110,9 @@ async function main(): Promise<void> {
   const serverIdPk = b64uDecode(SERVER_IDPK_B64!);
 
   const saved = await loadResumeState();
+  const expiryReason = saved ? resumeExpiryReason(saved, RESUME_POLICY, Date.now()) : null;
   let session: Session;
-  if (saved) {
+  if (saved && !expiryReason) {
     console.log("[client] found saved session — attempting resume...");
     try {
       session = await attemptResume(nym, saved, me);
@@ -106,6 +123,10 @@ async function main(): Promise<void> {
       session = await fullHandshake(nym, serverPk, serverIdPk, me);
     }
   } else {
+    if (saved && expiryReason) {
+      console.log(`[client] resume chain expired (${expiryReason}) — forcing full handshake for fresh PFS.`);
+      await dropResumeState();
+    }
     session = await fullHandshake(nym, serverPk, serverIdPk, me);
   }
 
@@ -124,7 +145,7 @@ async function main(): Promise<void> {
     channel = dc;
     console.error("[client] WebRTC DataChannel open — entering interactive mode.");
   }
-  await runInteractive(channel);
+  await runInteractive(channel, nym);
 }
 
 // Bridges process.stdin/stdout to the data channel, the same wire format the
@@ -138,7 +159,7 @@ async function main(): Promise<void> {
 // On a pipe (e.g. `echo "ls -la" | npm run client`): line mode; we still
 // forward stdin to the channel byte-for-byte, but stop when stdin EOFs.
 // Useful for one-shot remote command execution from scripts.
-async function runInteractive(channel: Channel): Promise<void> {
+async function runInteractive(channel: Channel, nym: NymTransport): Promise<void> {
   const isTTY = process.stdin.isTTY === true && process.stdout.isTTY === true;
 
   const sendInput = (chunk: string): void => {
@@ -162,19 +183,21 @@ async function runInteractive(channel: Channel): Promise<void> {
     }
   });
 
-  const cleanup = (code = 0): void => {
+  const cleanup = async (code = 0): Promise<void> => {
     if (isTTY) {
       try { process.stdin.setRawMode(false); } catch { /* not a TTY */ }
     }
     try { process.stdin.pause(); } catch { /* ignore */ }
-    // Give the last AEAD frame a moment to flush over Nym if we're closing
-    // mid-burst.
-    setTimeout(() => process.exit(code), 50);
+    // Drain the local nym-client WS buffer so the last AEAD frame we just
+    // wrote actually reaches the wire before we kill the process. Replaces
+    // an older fixed-50ms setTimeout that was flaky under load.
+    try { await nym.drain(500); } catch { /* best effort */ }
+    process.exit(code);
   };
 
   channel.addEventListener("close", () => {
     process.stdout.write("\r\n[connection closed]\r\n");
-    cleanup(0);
+    void cleanup(0);
   });
 
   if (isTTY) {
@@ -189,7 +212,7 @@ async function runInteractive(channel: Channel): Promise<void> {
   // For piped stdin: when the producer EOFs, we wrap up. For a real TTY,
   // 'end' only fires after Ctrl+D *and* nothing else holds stdin open — in
   // practice it's safe to treat as a request to exit.
-  process.stdin.on("end", () => cleanup(0));
+  process.stdin.on("end", () => void cleanup(0));
   process.stdin.resume();
 }
 
@@ -221,7 +244,7 @@ function attemptResume(
           reject(e as Error);
           return;
         }
-        saveResumeState(newResumeStateAfterResume(attempt)).catch(() => {});
+        saveResumeState(newResumeStateAfterResume(attempt, saved)).catch(() => {});
         detach();
         resolve(attempt.session);
       }

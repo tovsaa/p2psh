@@ -10,13 +10,15 @@
 //      signal if a bump silently re-defined the encoding.
 //
 // The hardcoded `EXPECTED_*` bytes below were produced by running this same
-// computation against @noble/post-quantum@0.4.1. If they ever stop matching,
-// either the library changed underneath us (investigate before bumping) or
-// we deliberately upgraded — in which case recompute and re-paste.
+// computation against @noble/post-quantum@0.4.1 and re-verified to be identical
+// under 0.6.1 (the 0.4→0.6 bump did not change ML-KEM-768 wire bytes). If they
+// ever stop matching, either the library changed underneath us (investigate
+// before bumping) or we deliberately upgraded — in which case recompute and
+// re-paste from `node tests/_compute-kat.mjs`.
 //
 // Run: `npm test`.
 
-import { ml_kem768 } from "@noble/post-quantum/ml-kem";
+import { ml_kem768 } from "@noble/post-quantum/ml-kem.js";
 
 function hex(u: Uint8Array): string {
   return Array.from(u, (b) => b.toString(16).padStart(2, "0")).join("");
@@ -35,9 +37,9 @@ function assertEq(label: string, got: unknown, want: unknown): void {
 const seed = Uint8Array.from({ length: 64 }, (_, i) => i);
 const msg = Uint8Array.from({ length: 32 }, (_, i) => 128 + i);
 
-// Expected outputs from @noble/post-quantum@0.4.1. Recompute via
-// `node tests/_compute-kat.mjs` (kept around as a tiny generator) after any
-// intentional library bump.
+// Expected outputs from @noble/post-quantum (0.4.1 and 0.6.1 agree byte-for-byte
+// on this fixture). Recompute via `node tests/_compute-kat.mjs` (kept around
+// as a tiny generator) after any intentional library bump.
 const EXPECTED_PK_LEN = 1184;
 const EXPECTED_SK_LEN = 2400;
 const EXPECTED_CT_LEN = 1088;

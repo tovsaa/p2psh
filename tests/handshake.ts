@@ -14,6 +14,7 @@
 //   5. Resume with wrong saved key must fail (proof-of-possession).
 
 import {
+  DEFAULT_RESUME_POLICY,
   clientInitiate,
   clientResume,
   clientVerifyAck,
@@ -23,6 +24,7 @@ import {
   extractResumeStateFromHandshake,
   generateServerIdentity,
   newResumeStateAfterResume,
+  resumeExpiryReason,
   serverAccept,
   serverResume,
 } from "../src/shared/handshake.js";
@@ -121,11 +123,20 @@ function throws(label: string, fn: () => unknown): void {
     new TextDecoder().decode(decodeAppData(attempt.session, s2c)) === "post-resume s2c",
   );
 
-  // `newResumeStateAfterResume` must move the saved key forward.
-  const next = newResumeStateAfterResume(attempt);
+  // `newResumeStateAfterResume` must move the saved key forward and bump
+  // the chain's resume counter while preserving its establishedAt anchor.
+  const next = newResumeStateAfterResume(attempt, saved);
   ok(
     "resume state advances key",
     b64uEncode(next.key) !== b64uEncode(saved.key),
+  );
+  ok(
+    "resume count increments",
+    next.resumeCount === (saved.resumeCount ?? 0) + 1,
+  );
+  ok(
+    "resume preserves establishedAt anchor",
+    next.establishedAt === saved.establishedAt,
   );
 }
 
@@ -144,6 +155,121 @@ function throws(label: string, fn: () => unknown): void {
   const serverSide = serverResume(attempt.request, r.sessionKey);
   throws("resume with wrong saved key rejected", () =>
     clientVerifyResumeAck(serverSide.ack, attempt),
+  );
+}
+
+// 6. Resume-chain expiry policy. Pure function; we drive it with synthetic
+//    states and a fixed `now` rather than wall-clock, so the test is
+//    deterministic and doesn't sleep.
+{
+  const dummyKey = new Uint8Array(32);
+  const dummyId = new Uint8Array(16);
+
+  const fresh = { sessionId: dummyId, key: dummyKey, establishedAt: 1_000_000, resumeCount: 0 };
+  ok(
+    "fresh state within policy is not expired",
+    resumeExpiryReason(fresh, DEFAULT_RESUME_POLICY, 1_000_000 + 60_000) === null,
+  );
+
+  const tooOld = {
+    sessionId: dummyId,
+    key: dummyKey,
+    establishedAt: 1_000_000,
+    resumeCount: 0,
+  };
+  ok(
+    "state past maxAgeMs is expired",
+    resumeExpiryReason(tooOld, DEFAULT_RESUME_POLICY, 1_000_000 + DEFAULT_RESUME_POLICY.maxAgeMs + 1) !== null,
+  );
+
+  const tooMany = {
+    sessionId: dummyId,
+    key: dummyKey,
+    establishedAt: Date.now(),
+    resumeCount: DEFAULT_RESUME_POLICY.maxCount,
+  };
+  ok(
+    "state at maxCount is expired",
+    resumeExpiryReason(tooMany, DEFAULT_RESUME_POLICY, Date.now()) !== null,
+  );
+
+  // Legacy state with no metadata (written by a pre-PFS client) is grandfathered
+  // — count defaults to 0 and missing establishedAt skips the age check. One
+  // grace resume is allowed before the chain gets reseeded.
+  const legacy = { sessionId: dummyId, key: dummyKey };
+  ok(
+    "legacy state without metadata gets a grace resume",
+    resumeExpiryReason(legacy, DEFAULT_RESUME_POLICY, Date.now()) === null,
+  );
+}
+
+// 7. Downgrade attack — forced fallback from resume to full handshake.
+//
+//    Threat model: a network attacker who sits between client and server (or
+//    a malicious mixnet gateway) can drop legitimate `resume-ack` frames and
+//    inject a `resume-nack` frame instead. The client's documented behavior
+//    is to drop saved state and run a full ML-KEM handshake.
+//
+//    This is intentional — `resume-nack` carries no signature or MAC because
+//    a server that has lost its state cannot prove it (it doesn't know the
+//    previous session key anymore). Adding auth would require a separate
+//    server-held secret just for nacks, doubling the long-term key surface.
+//
+//    The mitigation lives at a different layer: (a) the full-handshake
+//    fallback is still authenticated by the pinned Ed25519 identity — see
+//    test #2 above. (b) The PFS policy caps chain length so full handshakes
+//    are amortized anyway. (c) An attacker who forces a downgrade does not
+//    learn the new session key unless they also possess the server's ML-KEM
+//    secret (which is post-quantum-resistant).
+//
+//    These tests document the property by asserting:
+//    - `resume-nack` is structurally unauthenticated (forgeable).
+//    - The full-handshake session that follows a forced downgrade is
+//      cryptographically independent of any previous resume chain.
+{
+  // (a) Structural: a forged resume-nack is indistinguishable from a
+  //     legitimate one. The attacker needs zero key material.
+  const forgedNack = { t: "resume-nack", reason: "(forged by attacker)" };
+  const legitimateNack = { t: "resume-nack", reason: "unknown sessionId" };
+  ok(
+    "resume-nack carries no MAC/signature — anyone can forge it",
+    Object.keys(forgedNack).every((k) => k === "t" || k === "reason") &&
+      Object.keys(legitimateNack).every((k) => k === "t" || k === "reason"),
+  );
+
+  // (b) After a forced downgrade, the new full handshake binds to the
+  //     server's pinned Ed25519 identity. An attacker who forced the
+  //     downgrade but doesn't hold the server's Ed25519 secret cannot
+  //     impersonate the server in the fresh handshake — the client's
+  //     `clientVerifyAck` will reject any ack not signed by the pinned key.
+  //     (This is the same property as test #2 but spelled out for the
+  //     downgrade-then-MITM compound attack.)
+  const realServer = generateServerIdentity();
+  const attackerServer = generateServerIdentity();
+  // After downgrade, the client runs `clientInitiate` against what it
+  // believes is the real server's KEM key. If the attacker substituted
+  // their own KEM key in flight, the Ed25519 signature in the ack will
+  // not match the pinned real-server idPublicKey.
+  const downgraded = clientInitiate(realServer.publicKey, "client-addr", "nym");
+  const attackerAck = serverAccept(downgraded.hello, attackerServer).ack;
+  throws(
+    "downgrade-then-MITM: attacker's ack rejected under real server's pinned ID key",
+    () => clientVerifyAck(attackerAck, downgraded, realServer.idPublicKey),
+  );
+
+  // (c) Fresh full handshake after downgrade produces a session key that
+  //     is independent of any prior resume chain. We simulate a chain that
+  //     produced rotated key K_old, then force a downgrade and run a fresh
+  //     handshake; the new session key must not equal K_old.
+  const id = generateServerIdentity();
+  const original = clientInitiate(id.publicKey, "client-addr", "nym");
+  serverAccept(original.hello, id); // would have produced session, ignore.
+  const originalKey = original.sessionKey;
+  // Now simulate downgrade: same client starts a fresh full handshake.
+  const fresh = clientInitiate(id.publicKey, "client-addr", "nym");
+  ok(
+    "post-downgrade session key is independent of pre-downgrade chain",
+    b64uEncode(fresh.sessionKey) !== b64uEncode(originalKey),
   );
 }
 

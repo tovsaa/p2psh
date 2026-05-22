@@ -142,12 +142,16 @@ Server-side env vars (set with `-e` on `docker run`):
 | `P2PSH_WEB_URL`      | (unset)                            | public web-client URL; if set, the server also prints a ready-to-share deep link |
 | `NYM_CLIENT_ID`      | `p2psh`                            | nym-client config id (under `$HOME/.nym/clients/`)   |
 
+A ready-to-edit [`.env.example`](.env.example) is in the repo root with the
+recommended production hardening flags pre-filled (restrict shell, ephemeral
+HOME, audit log, conservative DoS caps).
+
 CLI client env vars (when running `npm run client` directly):
 
 | Var                  | Default                            | Purpose                                              |
 |----------------------|------------------------------------|------------------------------------------------------|
 | `P2PSH_CONNECT`      | —                                  | the `p2psh1://…` string from the server              |
-| `P2PSH_TRANSPORT`    | `webrtc`                           | the transport this client requests; server rejects if not in its allowlist |
+| `P2PSH_TRANSPORT`    | `nym`                              | the transport this client requests (`nym` or `webrtc`); server rejects if not in its allowlist |
 
 ### Transport modes
 
@@ -161,14 +165,15 @@ mismatched request gets an explicit `{t:"error", code:"transport-not-allowed"}`
 frame back; a missing/invalid field gets `code:"bad-request"`. Either way the
 client sees a fatal reject instead of a silent hang.
 
-- **`webrtc` (client default).** After the ML-KEM handshake the peers swap
-  SDP/ICE over Nym, then move all traffic to a P2P WebRTC DataChannel. Lowest
-  latency, but each side learns the other's public IP via STUN
-  (`stun.l.google.com`, `stun.cloudflare.com`) — Nym anonymity covers the
-  handshake only.
-- **`nym`.** Every shell frame is AEAD-sealed and routed through the mixnet,
-  WebRTC is skipped entirely. Neither side ever learns the other's IP. Latency
-  is noticeably higher (typical mixnet RTT is hundreds of ms).
+- **`nym` (client default).** Every shell frame is AEAD-sealed and routed
+  through the mixnet, WebRTC is skipped entirely. Neither side ever learns the
+  other's IP. Latency is noticeably higher (typical mixnet RTT is hundreds of
+  ms). Default since it's the security-by-default choice — opt into `webrtc`
+  only when you accept the STUN IP exposure for lower latency.
+- **`webrtc`.** After the ML-KEM handshake the peers swap SDP/ICE over Nym,
+  then move all traffic to a P2P WebRTC DataChannel. Lowest latency, but each
+  side learns the other's public IP via STUN (`stun.l.google.com`,
+  `stun.cloudflare.com`) — Nym anonymity covers the handshake only.
 
 The web client runs a 3s STUN probe on load against two independent STUN
 servers (Google and Cloudflare). It classifies the local NAT as:

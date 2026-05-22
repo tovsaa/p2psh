@@ -13,10 +13,10 @@
     "test": "tsx tests/ml-kem-kat.ts && tsx tests/protocol.ts && tsx tests/connect-string.ts && tsx tests/limits.ts && tsx tests/aead.ts && tsx tests/handshake.ts"
   },
   "dependencies": {
-    "@noble/ciphers": "^1.2.1",
-    "@noble/curves": "^1.9.7",
-    "@noble/hashes": "^1.7.1",
-    "@noble/post-quantum": "0.4.1",
+    "@noble/ciphers": "^2.2.0",
+    "@noble/curves": "^2.2.0",
+    "@noble/hashes": "^2.2.0",
+    "@noble/post-quantum": "0.6.1",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
     "node-pty": "^1.1.0",
@@ -30,8 +30,8 @@
     "@nymproject/sdk-full-fat": "^1.4.1",
     "@types/node": "^22.10.0",
     "@types/ws": "^8.5.13",
-    "tsx": "^4.19.2",
-    "typescript": "^5.7.2",
-    "vite": "^8.0.13"
+    "tsx": "^4.22.3",
+    "typescript": "^6.0.3",
+    "vite": "^8.0.14"
   }
 }

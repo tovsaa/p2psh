@@ -19,6 +19,15 @@ export interface IncomingMessage {
   senderTag: string | null;
 }
 
+// Native nym-client WS frames we care about. Any unknown `type` is silently
+// ignored by the switch in onFrame.
+interface NymFrame {
+  type?: string;
+  address?: unknown;
+  message?: unknown;
+  senderTag?: unknown;
+}
+
 export class NymTransport {
   private ws!: WebSocket;
   private readyP!: Promise<void>;
@@ -45,19 +54,22 @@ export class NymTransport {
     else if (Buffer.isBuffer(data)) text = data.toString("utf8");
     else text = Buffer.concat(data as Buffer[]).toString("utf8");
 
-    let obj: any;
+    let obj: NymFrame;
     try {
-      obj = JSON.parse(text);
+      obj = JSON.parse(text) as NymFrame;
     } catch {
       // Binary frames from nym-client are uncommon for our JSON-only usage; ignore.
       return;
     }
     switch (obj.type) {
       case "selfAddress":
-        this.selfAddrResolve?.(obj.address);
+        if (typeof obj.address === "string") this.selfAddrResolve?.(obj.address);
         break;
       case "received":
-        for (const l of this.listeners) l({ text: obj.message, senderTag: obj.senderTag ?? null });
+        if (typeof obj.message === "string") {
+          const senderTag = typeof obj.senderTag === "string" ? obj.senderTag : null;
+          for (const l of this.listeners) l({ text: obj.message, senderTag });
+        }
         break;
       case "error":
         console.error("[nym] error:", obj.message);
@@ -92,6 +104,29 @@ export class NymTransport {
   }
 
   async close(): Promise<void> {
-    this.ws.close();
+    if (this.ws.readyState === WebSocket.CLOSED) return;
+    await new Promise<void>((resolve) => {
+      this.ws.once("close", () => resolve());
+      try { this.ws.close(); } catch { resolve(); }
+    });
+  }
+
+  /**
+   * Wait until the underlying WS socket has flushed its outgoing buffer, or
+   * the timeout elapses. `ws.send` is non-blocking — the bytes sit in
+   * `bufferedAmount` until the OS-level socket write completes. Process exit
+   * immediately after a `send` can drop the trailing frames; calling
+   * `drain()` before exit makes the "send then exit" pattern deterministic
+   * for the common case of a script piping one command into the client.
+   *
+   * The timeout is a safety cap: if nym-client died mid-flush we don't want
+   * to hang forever. 500 ms is generous — local-socket flush is typically
+   * sub-millisecond.
+   */
+  async drain(timeoutMs = 500): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (this.ws.bufferedAmount > 0 && Date.now() < deadline) {
+      await new Promise<void>((r) => setTimeout(r, 5));
+    }
   }
 }

@@ -31,10 +31,10 @@
     <fieldset style="margin-top: 0.8em; padding: 0.4em 0.8em; border: 1px solid #444;">
       <legend style="font-weight: 600;">Transport</legend>
       <label style="display: inline-block; margin-right: 1em; font-weight: normal;">
-        <input type="radio" name="transport" value="webrtc" checked /> WebRTC (low-latency P2P; exposes your IP to the peer via STUN)
+        <input type="radio" name="transport" value="webrtc" /> WebRTC (low-latency P2P; exposes your IP to the peer via STUN)
       </label>
       <label style="display: block; font-weight: normal;">
-        <input type="radio" name="transport" value="nym" /> Nym tunnel (slower; IP never leaves your machine — every frame goes through the mixnet)
+        <input type="radio" name="transport" value="nym" checked /> Nym tunnel (slower; IP never leaves your machine — every frame goes through the mixnet)
       </label>
       <p id="nat-status" style="margin: 0.4em 0 0; color: #888; font-size: 12px;">Checking NAT for WebRTC reachability…</p>
     </fieldset>
