@@ -341,7 +341,8 @@ function fullHandshake(
       saveResumeState(serverIdPkB64, extractResumeStateFromHandshake(state));
       log("handshake verified — Ed25519 OK, session key agreed and saved.");
       detach();
-      resolve(state.session);
+      // clientVerifyAck populates state.session on success.
+      resolve(state.session!);
     });
     log(`sending ClientHello to ${serverAddr.slice(0, 24)}...`);
     nym.send(serverAddr, JSON.stringify(state.hello));

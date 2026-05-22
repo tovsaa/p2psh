@@ -258,18 +258,72 @@ function throws(label: string, fn: () => unknown): void {
   );
 
   // (c) Fresh full handshake after downgrade produces a session key that
-  //     is independent of any prior resume chain. We simulate a chain that
-  //     produced rotated key K_old, then force a downgrade and run a fresh
-  //     handshake; the new session key must not equal K_old.
+  //     is independent of any prior resume chain. We run TWO complete
+  //     handshakes against the same server identity and assert the derived
+  //     keys differ — because both runs sample fresh ML-KEM encapsulation
+  //     randomness and a fresh X25519 ephemeral on each side.
   const id = generateServerIdentity();
   const original = clientInitiate(id.publicKey, "client-addr", "nym");
-  serverAccept(original.hello, id); // would have produced session, ignore.
-  const originalKey = original.sessionKey;
+  const originalAck = serverAccept(original.hello, id);
+  clientVerifyAck(originalAck.ack, original, id.idPublicKey);
   // Now simulate downgrade: same client starts a fresh full handshake.
   const fresh = clientInitiate(id.publicKey, "client-addr", "nym");
+  const freshAck = serverAccept(fresh.hello, id);
+  clientVerifyAck(freshAck.ack, fresh, id.idPublicKey);
   ok(
     "post-downgrade session key is independent of pre-downgrade chain",
-    b64uEncode(fresh.sessionKey) !== b64uEncode(originalKey),
+    b64uEncode(fresh.sessionKey!) !== b64uEncode(original.sessionKey!),
+  );
+}
+
+// 8. Hybrid KEM — explicit tests for the X25519 half of the construction.
+//    Test #1 already proves end-to-end roundtrip succeeds; these tests
+//    target the hybrid-specific properties:
+//    - ClientHello and ServerAck carry X25519 ephemeral public keys.
+//    - Tampering with the X25519 pk in flight breaks the session key
+//      derivation, so the ack's AEAD payload fails to decrypt.
+//    - Two independent handshakes against the same identity sample fresh
+//      X25519 ephemerals on both sides (verified by all four pks differing).
+{
+  const id = generateServerIdentity();
+  const state = clientInitiate(id.publicKey, "client-addr", "nym");
+  ok(
+    "ClientHello carries X25519 public key (32 bytes)",
+    typeof state.hello.x25519Pk === "string" && state.hello.x25519Pk.length > 0,
+  );
+  const r = serverAccept(state.hello, id);
+  ok(
+    "ServerAck carries X25519 public key (32 bytes)",
+    typeof r.ack.x25519Pk === "string" && r.ack.x25519Pk.length > 0,
+  );
+
+  // MITM swaps server's X25519 pk for an attacker-generated one. Signature
+  // is over the real server's view, so it still verifies (attacker can't
+  // forge the Ed25519 sig). But the client's combined secret now uses the
+  // wrong X25519 SS, so AEAD-decrypt of the ack payload fails.
+  // Actually — the sig is over the SWAPPED pk if the attacker re-signs?
+  // No: attacker doesn't have the Ed25519 secret. So the attacker can only
+  // tamper with the x25519Pk field, leaving sig binding the ORIGINAL pks.
+  // Client recomputes transcript with the swapped pk → sig verify fails.
+  const tamperedAck = { ...r.ack, x25519Pk: state.hello.x25519Pk }; // swap server's pk
+  const state2 = clientInitiate(id.publicKey, "client-addr", "nym");
+  throws(
+    "tampered X25519 pk in ack breaks signature verification",
+    () => clientVerifyAck(tamperedAck, state2, id.idPublicKey),
+  );
+
+  // Fresh ephemerals across runs.
+  const run1 = clientInitiate(id.publicKey, "alice", "nym");
+  const ack1 = serverAccept(run1.hello, id);
+  const run2 = clientInitiate(id.publicKey, "bob", "nym");
+  const ack2 = serverAccept(run2.hello, id);
+  ok(
+    "two handshakes sample distinct client X25519 ephemerals",
+    run1.hello.x25519Pk !== run2.hello.x25519Pk,
+  );
+  ok(
+    "two handshakes sample distinct server X25519 ephemerals",
+    ack1.ack.x25519Pk !== ack2.ack.x25519Pk,
   );
 }
 

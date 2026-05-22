@@ -17,8 +17,8 @@ The wire goes:
   Browser                         Nym mixnet                       Linux server
   ┌───────────────────┐           (signaling only;                 ┌───────────────────┐
   │  xterm.js         │            sees ciphertext)                │  PTY shell        │
-  │  ML-KEM-768       │       ┌──────────────┐                     │  node-pty         │
-  │  Ed25519 verify   │  ◄──► │ SDP + ICE +  │ ◄────────────────►  │  ML-KEM-768       │
+  │  ML-KEM + X25519  │       ┌──────────────┐                     │  node-pty         │
+  │  Ed25519 verify   │  ◄──► │ SDP + ICE +  │ ◄────────────────►  │  ML-KEM + X25519  │
   │  ChaCha20-Poly1305│       │ resume frames│                     │  Ed25519 sign     │
   │  @nymproject/sdk  │       │ inside AEAD  │                     │  nym-client       │
   └────────┬──────────┘       └──────────────┘                     └──────────┬────────┘
@@ -27,11 +27,11 @@ The wire goes:
                               (UDP P2P, post-handshake)
 ```
 
-- **Key exchange:** ML-KEM-768 (post-quantum, `@noble/post-quantum`, version-pinned with a [KAT regression test](tests/ml-kem-kat.ts)) → HKDF-SHA256 → ChaCha20-Poly1305. Threat model and known limitations: see [`SECURITY.md`](SECURITY.md).
+- **Key exchange:** **hybrid ML-KEM-768 + X25519** — both run on every full handshake; their shared secrets concatenate into HKDF-SHA256 and feed ChaCha20-Poly1305. Security degrades to the strictly stronger of the two halves: a flaw in ML-KEM still leaves X25519's classical guarantee; a cryptographically-relevant quantum computer still leaves ML-KEM's post-quantum guarantee. ML-KEM is `@noble/post-quantum`, version-pinned with a [KAT regression test](tests/ml-kem-kat.ts); X25519 is `@noble/curves`. Threat model: [`SECURITY.md`](SECURITY.md).
 - **Server authentication:** Ed25519 signature over the transcript, client pins the public key.
 - **Signaling:** every SDP / ICE / resume frame travels through Nym, AEAD-sealed; the gateway sees only encrypted bytes.
 - **Data plane:** browser-native `RTCPeerConnection` ↔ `werift` on Node.js. After WebRTC is up, Nym is idle.
-- **Session resume:** an HKDF-rotated key persists in the browser's `localStorage`; subsequent connects skip the full ML-KEM round-trip.
+- **Session resume:** an HKDF-rotated key persists in the browser's `localStorage`; subsequent connects skip the full hybrid round-trip. Chain length is capped (24h / 64 resumes by default) so PFS is bounded — past the cap the next connect runs a fresh hybrid handshake.
 
 ## Quick start
 
@@ -291,13 +291,18 @@ Workers, Deno Deploy) do **not** work — they lack persistent processes,
 The wire format and crypto choices are in [`src/shared/protocol.ts`](src/shared/protocol.ts)
 and [`src/shared/handshake.ts`](src/shared/handshake.ts). High-level summary:
 
-**Initial handshake.** Client picks an ephemeral ML-KEM-768 secret, encapsulates
-against the server's pinned KEM public key, sends `{t:"hello", kemCt, replyTo}`
-through Nym. Server decapsulates, derives the AEAD key via HKDF-SHA256,
-signs `H("p2psh/v0/transcript" || kemPk || kemCt)` with its Ed25519 identity
-key, replies with `{t:"ack", enc, sig}` where `enc = AEAD("ok")`. Client
-verifies the signature, then the AEAD decrypt, in that order — so a wrong
-identity can't poison the receive counter.
+**Initial handshake (wire v1, hybrid).** Client encapsulates against the
+server's pinned ML-KEM-768 public key AND generates a fresh X25519 ephemeral,
+then sends `{t:"hello", kemCt, x25519Pk, replyTo}` through Nym. Server
+decapsulates ML-KEM, generates its own X25519 ephemeral, computes the X25519
+ECDH shared secret, combines `mlKemSS || x25519SS` through HKDF-SHA256 into
+the AEAD key, signs `H("p2psh/v1/transcript" || serverKemPk || kemCt ||
+clientX25519Pk || serverX25519Pk)` with its Ed25519 identity key, and replies
+with `{t:"ack", x25519Pk, enc, sig}` where `enc = AEAD("ok")`. Client verifies
+the signature, then the AEAD decrypt, in that order — so a wrong identity
+can't poison the receive counter. The hybrid degrades to the stronger of
+ML-KEM (post-quantum) or X25519 (classical); both broken simultaneously
+requires both a CRQC and a classical break, neither of which exists.
 
 **Session resume.** A 16-byte `sessionId = HKDF(sharedSecret, "session-id")` is
 derived on both sides at handshake time. The browser keeps `{sessionId, key}`

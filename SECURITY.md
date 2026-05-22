@@ -12,10 +12,19 @@ is no separate security inbox yet.
 P2PSH gives an authenticated peer an interactive shell on the host. The wire
 is protected by:
 
-- **ML-KEM-768** (`@noble/post-quantum`, version-pinned, KAT-tested) for
-  post-quantum key encapsulation.
+- **Hybrid ML-KEM-768 + X25519** for key agreement. Both halves run on every
+  full handshake; their shared secrets are concatenated and fed through
+  HKDF-SHA256 to derive the AEAD key. ML-KEM is `@noble/post-quantum`
+  (version-pinned, KAT-tested); X25519 is `@noble/curves`. The hybrid degrades
+  to the strictly stronger half: a break in ML-KEM still leaves classical
+  X25519 security; a cryptographically-relevant quantum computer still leaves
+  post-quantum ML-KEM security. Resume reuses the existing AEAD key (no fresh
+  KEM/ECDH) and rotates it via HKDF — see "Forward secrecy" below.
 - **Ed25519** for server identity. Clients pin the server's `idPublicKey` out
-  of band (it ships inside the `p2psh1://` connect string).
+  of band (it ships inside the `p2psh1://` connect string). The signature is
+  over `sha256("p2psh/v1/transcript" || serverKemPk || kemCt || clientX25519Pk
+  || serverX25519Pk)` — binding the long-term identity to *both* halves of the
+  hybrid prevents a MITM from swapping one factor.
 - **ChaCha20-Poly1305** AEAD over a per-direction nonce (`c2s` / `s2c`) and a
   64-bit sequence counter. Receiver enforces a 1024-frame sliding anti-replay
   window — Nym reorders frames, so out-of-order is normal but old frames are
@@ -43,7 +52,8 @@ Out of scope:
 | `werift` transitive `ip@*` SSRF (GHSA-2p57-rm9w-gvfp) | medium | We do not call `ip.isPublic()`. CI's `npm audit` gates on CRITICAL only, with `HIGH` documented as an exception. Revisit when `werift` adopts `@isaacs/ip-fork` or when we migrate WebRTC libraries. |
 | WebRTC mode exposes peer IP via STUN | inherent | A direct P2P UDP path requires reflexive-address discovery. The web client falls back to the Nym tunnel automatically when STUN fails or the NAT looks symmetric; users wanting full anonymity for bulk traffic should pick Nym manually. We do not ship a TURN relay. |
 | Forward secrecy through resume is partial | low | Resume rotates the AEAD key via HKDF of the previous key plus a fresh client salt. Compromise of a current resume key reveals all future resume keys derived from it *within the same chain*. The client bounds chain length via a policy (default 64 resumes / 24h chain age, configurable via `P2PSH_RESUME_MAX_COUNT` / `P2PSH_RESUME_MAX_AGE_MS`); once exceeded, the next connect runs a full ML-KEM handshake, breaking the chain and re-establishing independent key material. Past AEAD ciphertext recorded before the most recent resume is NOT recoverable. |
-| `@noble/post-quantum` is the only ML-KEM impl | low | Audited by Cure53 (Feb 2024), version-pinned to `0.6.1` and regression-guarded by `tests/ml-kem-kat.ts` with hardcoded known-answer vectors. Verified that the 0.4→0.6 bump did not change ML-KEM-768 bytes; any future bump must keep the KAT green or the test forces re-validation. |
+| `@noble/post-quantum` is the only ML-KEM impl | low | Audited by Cure53 (Feb 2024), version-pinned to `0.6.1` and regression-guarded by `tests/ml-kem-kat.ts` with hardcoded known-answer vectors. Verified that the 0.4→0.6 bump did not change ML-KEM-768 bytes; any future bump must keep the KAT green or the test forces re-validation. Additionally, the hybrid X25519 half (from `@noble/curves`) means a hypothetical ML-KEM impl flaw doesn't immediately compromise sessions. |
+| Wire-protocol v0 ↔ v1 cross-version | accepted | v0 used pure ML-KEM-768; v1 (current) uses hybrid ML-KEM-768 + X25519. A v0 peer connecting to a v1 peer fails the signature verification (different transcript label) — connection is rejected, no silent downgrade. No migration tooling: bump the server and the client(s) together. |
 | No application-layer crypto over WebRTC DTLS | accepted | In WebRTC mode shell frames travel as plaintext JSON inside DTLS. The peer authenticates via the ML-KEM/Ed25519 layer before the channel opens; once open, DTLS is the only layer. In Nym mode every frame is AEAD-sealed end-to-end. |
 
 ## What's protected vs. what's not

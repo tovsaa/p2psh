@@ -284,7 +284,8 @@ function fullHandshake(
       saveResumeState(extractResumeStateFromHandshake(state)).catch(() => {});
       console.log("[client] handshake verified — Ed25519 OK, session key agreed and saved.");
       detach();
-      resolve(state.session);
+      // clientVerifyAck populates state.session on success.
+      resolve(state.session!);
     });
     console.log(`[client] sending ClientHello to ${SERVER_ADDR!.slice(0, 24)}...`);
     nym.send(SERVER_ADDR!, JSON.stringify(state.hello));

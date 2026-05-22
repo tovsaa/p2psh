@@ -2,6 +2,59 @@
 
 All notable changes go here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Changed — **wire-breaking**
+- **Hybrid ML-KEM-768 + X25519 key exchange.** Every full handshake now
+  runs both halves; their 32-byte shared secrets are concatenated and fed
+  through HKDF-SHA256 to derive the AEAD key. Wire format bumps to v1
+  (TRANSCRIPT_LABEL and HKDF info strings carry `p2psh/v1/...`). v0 peers
+  cannot talk to v1 peers: signature verification fails at the transcript
+  binding, so the connection drops without silent downgrade. Upgrade
+  server and clients together; resume state from v0 is auto-discarded
+  because the server's in-memory map is lost on restart anyway. ML-KEM
+  byte-level encoding is unchanged, KAT vectors still pass.
+  `ClientHello` gains `x25519Pk`; `ServerAck` gains `x25519Pk`.
+
+### Added
+- **Resume PFS policy.** Client caps chain length at 24h / 64 resumes
+  (overridable via `P2PSH_RESUME_MAX_AGE_MS` / `P2PSH_RESUME_MAX_COUNT`);
+  past the cap, the next connect runs a fresh hybrid handshake to break
+  forward dependence on the old chain key.
+- **`NymTransport.drain()`** for deterministic exit flush from the CLI
+  client; replaces the prior fixed 50 ms `setTimeout` flake under load.
+- **`.env.example`** documenting prod-hardening flags (`P2PSH_RESTRICT=1`,
+  `P2PSH_EPHEMERAL_HOME=1`, conservative DoS caps).
+- **Downgrade-attack test scenarios** in `tests/handshake.ts` (forged
+  resume-nack, downgrade-then-MITM, post-downgrade key independence).
+- **Hybrid-specific tests**: X25519 pk presence on both wire messages,
+  tampered X25519 pk breaks signature verification, distinct ephemerals
+  across runs.
+
+### Changed
+- **Client default `P2PSH_TRANSPORT=nym`** (was `webrtc`). Security-by-
+  default against STUN-driven peer IP exposure; opt into WebRTC explicitly
+  when low latency matters more than IP privacy. Web client radio button
+  defaults match.
+- **Dependency bumps.** `@noble/{ciphers,curves,hashes}` 1.x → ^2.2.0;
+  `@noble/post-quantum` 0.4.1 → 0.6.1 (exact pin retained, KAT verifies
+  byte-level compatibility); TypeScript 5.7 → ^6.0.3; tsx and Vite patch
+  bumps. Adapted to noble 2.x: `.js` subpath suffixes, `ed25519.keygen()`
+  in place of `ed25519.utils.randomPrivateKey()`.
+- **`NymTransport.close()`** now awaits the WS `close` event instead of
+  fire-and-forget. `onFrame` validates types instead of using `any`.
+
+### Fixed
+- **Web client: Nym signaling listener leak in `runWebRTC`.** Listener
+  is now detached on DataChannel open / error / close, and the
+  `RTCPeerConnection` is closed when the channel closes. Each reconnect
+  no longer accumulates one extra Nym subscriber.
+- **Web client: Connect button stuck disabled after a FATAL.** Now
+  re-enables in the catch handler so the user can retry without reload.
+- **Web client: `window.__p2psh` debug hook exposed in production
+  bundles.** Now gated behind `import.meta.env.DEV` — production XSS
+  payload can't grab the live `channel.send` reference.
+
 ## [v0.2.0] — 2026-05-20
 
 ### Added

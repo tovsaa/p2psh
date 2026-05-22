@@ -4,15 +4,27 @@
 // All messages are JSON objects sent as text frames over the Nym mixnet.
 // Binary fields (keys, ciphertexts, AEAD payloads) are base64url-encoded.
 //
-// Flow:
-//   1. Client -> Server : ClientHello   { kemCt }
-//      The server publishes its ML-KEM-768 public key out of band
-//      (printed on startup, copied into client config). The client
-//      runs ml_kem768.encapsulate(serverPk) and ships the ciphertext.
+// Wire version: v1. Bumped from v0 when the handshake gained the X25519
+// half of a hybrid KEM (ML-KEM-768 + X25519). The bump lives in the HKDF
+// info strings and the transcript label below, so a v0 peer and a v1 peer
+// derive different session keys and reject each other's signatures —
+// silent cross-version connection is prevented at the AEAD layer.
 //
-//   2. Server -> Client : ServerAck     { enc: AEAD("ok", k, nonce=0) }
-//      Proves to the client that the server successfully decapsulated
-//      and derived the same session key.
+// Flow:
+//   1. Client -> Server : ClientHello   { kemCt, x25519Pk }
+//      The server publishes its ML-KEM-768 public key out of band
+//      (printed on startup, copied into client config). The client runs
+//      ml_kem768.encapsulate(serverPk) AND generates a fresh X25519
+//      keypair; it ships the ML-KEM ciphertext and its X25519 public.
+//
+//   2. Server -> Client : ServerAck     { x25519Pk, enc, sig }
+//      Server decapsulates ML-KEM, generates its own ephemeral X25519
+//      keypair, computes the X25519 ECDH shared secret with the client,
+//      combines `mlKemSS || x25519SS` through HKDF into the session key,
+//      and signs the full transcript (label || serverKemPk || kemCt ||
+//      clientX25519Pk || serverX25519Pk) under its long-term Ed25519
+//      identity. `enc` is AEAD("ok") under the derived session key —
+//      proves the server reached the same key.
 //
 //   3. Either direction  : AppData      { seq, enc }
 //      Application payload encrypted with ChaCha20-Poly1305.
@@ -36,15 +48,17 @@ export type TransportChoice = "webrtc" | "nym";
 
 export interface ClientHello {
   t: "hello";
-  kemCt: string; // base64url, 1088 bytes
+  kemCt: string; // base64url, 1088 bytes — ML-KEM-768 encapsulation
+  x25519Pk: string; // base64url, 32 bytes — client's ephemeral X25519 public key
   replyTo: string; // client's Nym mix address; server uses this to route ack + further frames
   transport: TransportChoice;
 }
 
 export interface ServerAck {
   t: "ack";
+  x25519Pk: string; // base64url, 32 bytes — server's ephemeral X25519 public key
   enc: string; // base64url, AEAD(plaintext="ok") with seq=0, dir="s2c"
-  sig: string; // base64url Ed25519 signature over sha256(TRANSCRIPT_LABEL || serverKemPk || kemCt)
+  sig: string; // base64url Ed25519 signature over sha256(TRANSCRIPT_LABEL || serverKemPk || kemCt || clientX25519Pk || serverX25519Pk)
 }
 
 export interface AppData {
@@ -58,7 +72,7 @@ export interface AppData {
 // Flow:
 //   client -> server : { t: "resume", sessionId, salt, replyTo }
 //      Client picks a fresh 16-byte salt. Server looks up sessionId; if found,
-//      both sides derive a new key via HKDF(oldKey, salt, "p2psh/v0/resume") and
+//      both sides derive a new key via HKDF(oldKey, salt, "p2psh/v1/resume") and
 //      reset send/recv counters to 0.
 //   server -> client : { t: "resume-ack", enc }
 //      AEAD("RESUMED") under the rotated key with seq=0, dir=s2c. Verifying
@@ -95,7 +109,7 @@ export interface ServerError {
   reason?: string;
 }
 
-export const TRANSCRIPT_LABEL = new TextEncoder().encode("p2psh/v0/transcript");
+export const TRANSCRIPT_LABEL = new TextEncoder().encode("p2psh/v1/transcript");
 
 export const DIR_C2S = new Uint8Array([0x63, 0x32, 0x73, 0x00]); // "c2s\0"
 export const DIR_S2C = new Uint8Array([0x73, 0x32, 0x63, 0x00]); // "s2c\0"
