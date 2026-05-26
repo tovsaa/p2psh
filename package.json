@@ -21,14 +21,14 @@
     "@xterm/xterm": "^6.0.0",
     "node-pty": "^1.1.0",
     "werift": "^0.23.0",
-    "ws": "^8.18.0"
+    "ws": "^8.21.0"
   },
   "_notes": {
     "@nymproject/sdk-full-fat": "Browser-only: pulled in by vite at web build time and inlined into the static bundle. Not needed at Node runtime (server uses the WS-based NymTransport instead), hence devDependencies. Removing it would still let `npm run server` work but break `npm run web` / `vite build`."
   },
   "devDependencies": {
     "@nymproject/sdk-full-fat": "^1.4.1",
-    "@types/node": "^22.10.0",
+    "@types/node": "^25.9.1",
     "@types/ws": "^8.5.13",
     "tsx": "^4.22.3",
     "typescript": "^6.0.3",
