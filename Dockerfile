@@ -14,7 +14,7 @@
 # kept here for future persistence).
 
 # ---------- Stage 1: Node dependencies ----------
-FROM node:22-slim AS deps
+FROM node:25-slim AS deps
 WORKDIR /app
 COPY package.json package-lock.json* ./
 # node-pty needs build tools to compile from source on arches without prebuilt
@@ -55,7 +55,7 @@ RUN case "$TARGETARCH" in \
     esac
 
 # ---------- Stage 3: runtime ----------
-FROM node:22-slim
+FROM node:25-slim
 
 # `node:22-slim` ships yarn at /opt/yarn-* (~7 MB) which we don't use — pure
 # npm. Drop it together with the apt install in a single RUN so the cleanup
