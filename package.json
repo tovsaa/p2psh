@@ -13,10 +13,10 @@
     "test": "tsx tests/ml-kem-kat.ts && tsx tests/protocol.ts && tsx tests/connect-string.ts && tsx tests/limits.ts && tsx tests/aead.ts && tsx tests/handshake.ts"
   },
   "dependencies": {
-    "@noble/ciphers": "^2.2.0",
-    "@noble/curves": "^2.2.0",
-    "@noble/hashes": "^2.2.0",
-    "@noble/post-quantum": "0.6.1",
+    "@noble/ciphers": "^2.3.0",
+    "@noble/curves": "^2.3.0",
+    "@noble/hashes": "^2.3.0",
+    "@noble/post-quantum": "0.7.0",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
     "node-pty": "^1.1.0",
